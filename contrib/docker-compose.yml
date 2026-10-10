@@ -1,0 +1,55 @@
+# A throwaway Prometheus + Grafana for looking at a loadlab instance, wired to a dashboard and
+# alert rules that are the ones in this directory.
+#
+#   ssh -N -L 8080:127.0.0.1:8080 loadlab-host   # in another terminal
+#   docker compose -f contrib/docker-compose.yml up
+#   open http://localhost:3000             # admin/admin
+#
+# The loadlab job scrapes host.docker.internal rather than 127.0.0.1, because inside a container
+# 127.0.0.1 is the container. host-gateway is what makes that name resolve to the host, where your
+# tunnel is listening.
+#
+# Nothing here is meant to be a production deployment: no storage, no auth beyond the Grafana
+# default, and Prometheus keeps its data in a throwaway volume. For real use, take
+# prometheus/prometheus.yml and the dashboard into your own stack.
+
+services:
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=24h
+      - --web.enable-lifecycle
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./prometheus/loadlab.rules.yml:/etc/prometheus/loadlab.rules.yml:ro
+      # Inside a container 127.0.0.1 is the container, so the target has to name the host where
+      # the tunnel is listening. host-gateway is what makes that name resolve.
+      - ./prometheus/targets.docker.json:/etc/prometheus/targets.json:ro
+      - prometheus-data:/prometheus
+    extra_hosts:
+      - host.docker.internal:host-gateway
+    ports:
+      - "9090:9090"
+
+  grafana:
+    image: grafana/grafana:11.2.0
+    depends_on:
+      - prometheus
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+    volumes:
+      - ./grafana/loadlab.json:/var/lib/grafana/dashboards/loadlab.json:ro
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - grafana-data:/var/lib/grafana
+    ports:
+      - "3000:3000"
+
+volumes:
+  prometheus-data:
+  grafana-data:

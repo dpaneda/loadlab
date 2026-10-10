@@ -1,0 +1,52 @@
+[Unit]
+Description=loadlab - programmable Linux workload laboratory
+Documentation=file:///usr/local/share/doc/loadlab/deploy.md
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/var/lib/loadlab
+
+# Loopback only on purpose. The API can be told to reserve large amounts of anonymous memory, so it
+# must not be reachable from the LAN without authentication. Reach it through an SSH tunnel:
+#   ssh -L 8080:127.0.0.1:8080 user@host
+# Set LOADLAB_API_TOKEN (e.g. via an EnvironmentFile) and put a TLS reverse proxy in front if you
+# need to expose it more widely.
+#
+# The process ceiling defaults to 8 GiB. Lower it with --max-memory-bytes to bound what an API
+# client may request on this host.
+ExecStart=/usr/local/bin/loadlab --bind 127.0.0.1:8080 --file-backed-dir /var/lib/loadlab
+
+Restart=on-failure
+RestartSec=5
+
+# Backstops, sized to the host. MemoryHigh makes the kernel reclaim and throttle this cgroup before
+# anything is killed, which is far gentler than an OOM kill when a workload climbs near the ceiling;
+# MemoryMax is the last resort. Uncomment and size them to the machine:
+#MemoryHigh=2G
+#MemoryMax=3G
+
+# loadlab shrinks memory with MADV_DONTNEED, not by swapping. Allowing swap would make /proc
+# readings diverge from the model the tool is built to demonstrate.
+MemorySwapMax=0
+
+# The file-backed controller needs exactly one writable directory, to hold the temporary file it
+# creates. Everything else stays read-only, so this is the only path the sandbox opens up.
+#
+# `PrivateTmp=true` is correct here even though the file-backed controller refuses to run on tmpfs:
+# `PrivateTmp` only gives the process a private `/tmp` and `/var/tmp`, and loadlab never puts its
+# file in either. The controller's file lives in the path above, which `ProtectSystem=strict` would
+# otherwise make read-only. Keeping the isolation costs nothing.
+ReadWritePaths=/var/lib/loadlab
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictNamespaces=true
+RestrictRealtime=true
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target

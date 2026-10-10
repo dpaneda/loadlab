@@ -1,0 +1,585 @@
+# promtool unit tests for the file-backed rules.
+#
+#   promtool test rules contrib/prometheus/loadlab.rules_test.yml
+#
+# `promtool check rules` only proves the YAML parses and the PromQL compiles, which it will happily
+# do for an expression that can never fire because the metric name is misspelled. These tests pin
+# the behaviour instead: they push synthetic series through the real rules and assert which alerts
+# fire and, just as importantly, which do not.
+#
+# The annotations are written out in full because promtool compares them exactly, and that is
+# deliberate rather than incidental: an annotation is what an operator reads at 3am, so these tests
+# are how you find out that one has been reworded into something misleading. That is not
+# hypothetical, these tests caught two wrong $value templates while the rules were being written.
+#
+# Evaluation is at 15m because the file-backed alerts carry a 10m `for`. Asserting at 5m would pass
+# against a `for` that had silently been dropped.
+rule_files:
+  - loadlab.rules.yml
+
+evaluation_interval: 15s
+
+tests:
+  # A request above the disk ceiling is saturated, not merely unconverged. The guard on
+  # LoadlabFileBackedNotConverging is the subtle part here: without it this scenario would page twice
+  # for a single misconfiguration.
+  - interval: 15s
+    input_series:
+      - series: 'loadlab_file_backed_file_bytes'
+        values: '33554432x60'
+      - series: 'loadlab_configured_max_file_backed_bytes'
+        values: '33554432x60'
+      - series: 'loadlab_file_backed_saturated'
+        values: '1x60'
+      - series: 'loadlab_file_backed_requested_rss_bytes'
+        values: '67108864x60'
+      - series: 'loadlab_file_backed_target_rss_bytes'
+        values: '33554432x60'
+      - series: 'loadlab_file_backed_converged'
+        values: '0x60'
+      - series: 'loadlab_workload_running'
+        values: '1x60'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: LoadlabFileBackedNotConverging
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: LoadlabFileBackedSaturated
+        exp_alerts:
+          - exp_labels:
+              alertname: LoadlabFileBackedSaturated
+              severity: warning
+            exp_annotations:
+              summary: >-
+                loadlab file-backed target exceeds the operator disk ceiling
+              description: >-
+                The request has exceeded the disk ceiling for ten minutes, so the file is pinned at its limit however high the target goes. Compare `loadlab_file_backed_requested_rss_bytes` against `loadlab_configured_max_file_backed_bytes`, raise --max-file-backed-bytes, or lower file_backed.rss. No byte count is templated here because $value is the boolean condition, not a size.
+      - eval_time: 15m
+        alertname: LoadlabNearFileBackedCeiling
+        exp_alerts:
+          - exp_labels:
+              alertname: LoadlabNearFileBackedCeiling
+              severity: warning
+            exp_annotations:
+              summary: >-
+                loadlab file-backed file is within 10% of the operator disk ceiling
+              description: >-
+                100% of the disk ceiling is allocated. On a host where the file lives on the root filesystem this is the ENOSPC path, and the file is never truncated back down, so this does not clear by lowering the target.
+  # The same ceiling at 95% of it rather than pinned. This is the case that pins down what $value is in
+  # that annotation: the recording rule's ratio, not the 1 that a comparison would otherwise yield.
+  - interval: 15s
+    input_series:
+      - series: 'loadlab_file_backed_file_bytes'
+        values: '31876710x60'
+      - series: 'loadlab_configured_max_file_backed_bytes'
+        values: '33554432x60'
+      - series: 'loadlab_file_backed_saturated'
+        values: '0x60'
+      - series: 'loadlab_file_backed_requested_rss_bytes'
+        values: '31876710x60'
+      - series: 'loadlab_file_backed_target_rss_bytes'
+        values: '31876710x60'
+      - series: 'loadlab_file_backed_converged'
+        values: '1x60'
+      - series: 'loadlab_workload_running'
+        values: '1x60'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: LoadlabFileBackedNotConverging
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: LoadlabFileBackedSaturated
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: LoadlabNearFileBackedCeiling
+        exp_alerts:
+          - exp_labels:
+              alertname: LoadlabNearFileBackedCeiling
+              severity: warning
+            exp_annotations:
+              summary: >-
+                loadlab file-backed file is within 10% of the operator disk ceiling
+              description: >-
+                95% of the disk ceiling is allocated. On a host where the file lives on the root filesystem this is the ENOSPC path, and the file is never truncated back down, so this does not clear by lowering the target.
+  # An unconverged request that is under the ceiling is a real convergence failure, and must page even
+  # though the file is nowhere near the limit.
+  - interval: 15s
+    input_series:
+      - series: 'loadlab_file_backed_file_bytes'
+        values: '8388608x60'
+      - series: 'loadlab_configured_max_file_backed_bytes'
+        values: '33554432x60'
+      - series: 'loadlab_file_backed_saturated'
+        values: '0x60'
+      - series: 'loadlab_file_backed_requested_rss_bytes'
+        values: '16777216x60'
+      - series: 'loadlab_file_backed_target_rss_bytes'
+        values: '16777216x60'
+      - series: 'loadlab_file_backed_converged'
+        values: '0x60'
+      - series: 'loadlab_workload_running'
+        values: '1x60'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: LoadlabFileBackedNotConverging
+        exp_alerts:
+          - exp_labels:
+              alertname: LoadlabFileBackedNotConverging
+              severity: warning
+            exp_annotations:
+              summary: >-
+                loadlab is not holding the requested file-backed residency
+              description: >-
+                The file-backed controller has been off target for five minutes. No byte count is templated here: this alert fires on a conjunction of comparisons, so `$value` is the boolean 0 rather than a size. Compare `loadlab_file_backed_rss_bytes` against `loadlab_file_backed_requested_rss_bytes` for the gap itself, `loadlab_file_backed_target_rss_bytes` for a request that was clamped, and `loadlab_file_backed_actual_pages_per_second` for an access loop the machine will not sustain.
+      - eval_time: 15m
+        alertname: LoadlabFileBackedSaturated
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: LoadlabNearFileBackedCeiling
+        exp_alerts: []
+  # A healthy file-backed workload pages nothing. This guards against a rule that fires on a normal
+  # state, which is how alert rules get muted.
+  - interval: 15s
+    input_series:
+      - series: 'loadlab_file_backed_file_bytes'
+        values: '8388608x60'
+      - series: 'loadlab_configured_max_file_backed_bytes'
+        values: '33554432x60'
+      - series: 'loadlab_file_backed_saturated'
+        values: '0x60'
+      - series: 'loadlab_file_backed_requested_rss_bytes'
+        values: '8388608x60'
+      - series: 'loadlab_file_backed_target_rss_bytes'
+        values: '8388608x60'
+      - series: 'loadlab_file_backed_converged'
+        values: '1x60'
+      - series: 'loadlab_workload_running'
+        values: '1x60'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: LoadlabFileBackedNotConverging
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: LoadlabFileBackedSaturated
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: LoadlabNearFileBackedCeiling
+        exp_alerts: []
+  # An unconverged file-backed controller while the workload is stopped is not a fault, so
+  # loadlab_workload_running gates the convergence alert.
+  - interval: 15s
+    input_series:
+      - series: 'loadlab_file_backed_file_bytes'
+        values: '0x60'
+      - series: 'loadlab_configured_max_file_backed_bytes'
+        values: '33554432x60'
+      - series: 'loadlab_file_backed_saturated'
+        values: '0x60'
+      - series: 'loadlab_file_backed_requested_rss_bytes'
+        values: '0x60'
+      - series: 'loadlab_file_backed_target_rss_bytes'
+        values: '0x60'
+      - series: 'loadlab_file_backed_converged'
+        values: '0x60'
+      - series: 'loadlab_workload_running'
+        values: '0x60'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: LoadlabFileBackedNotConverging
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: LoadlabFileBackedSaturated
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: LoadlabNearFileBackedCeiling
+        exp_alerts: []
+
+  # A copy-on-write request above the combined shared ceiling is saturated, not merely unconverged.
+  # The guard on LoadlabSharedNotConverging is the subtle part: without it this scenario would page
+  # twice for a single misconfiguration.
+  - interval: 15s
+    input_series:
+      - series: 'loadlab_shared_segment_bytes'
+        values: '8388608x60'
+      - series: 'loadlab_shared_target_cow_bytes'
+        values: '33554432x60'
+      - series: 'loadlab_shared_requested_cow_bytes'
+        values: '58720256x60'
+      - series: 'loadlab_configured_max_shared_bytes'
+        values: '41943040x60'
+      - series: 'loadlab_shared_saturated'
+        values: '1x60'
+      - series: 'loadlab_shared_converged'
+        values: '0x60'
+      - series: 'loadlab_shared_child_actors'
+        values: '3x60'
+      - series: 'loadlab_shared_overcount_bytes'
+        values: '16777216x60'
+      - series: 'loadlab_workload_running'
+        values: '1x60'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: LoadlabSharedNotConverging
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: LoadlabSharedSaturated
+        exp_alerts:
+          - exp_labels:
+              alertname: LoadlabSharedSaturated
+              severity: warning
+            exp_annotations:
+              summary: >-
+                loadlab shared target exceeds the operator ceiling
+              description: >-
+                The copy-on-write request has exceeded the combined shared ceiling for ten minutes, so the per-actor private view is pinned below what was asked for however high the target goes. Compare `loadlab_shared_requested_cow_bytes` against `loadlab_configured_max_shared_bytes`, raise --max-shared-bytes, or lower shared.private_bytes. No byte count is templated here because $value is the boolean condition, not a size.
+      - eval_time: 15m
+        alertname: LoadlabSharedOvercountUnexpected
+        exp_alerts: []
+  # A healthy shared workload pages nothing. This guards against a rule that fires on a normal state.
+  - interval: 15s
+    input_series:
+      - series: 'loadlab_shared_segment_bytes'
+        values: '8388608x60'
+      - series: 'loadlab_shared_target_cow_bytes'
+        values: '8388608x60'
+      - series: 'loadlab_shared_requested_cow_bytes'
+        values: '8388608x60'
+      - series: 'loadlab_configured_max_shared_bytes'
+        values: '41943040x60'
+      - series: 'loadlab_shared_saturated'
+        values: '0x60'
+      - series: 'loadlab_shared_converged'
+        values: '1x60'
+      - series: 'loadlab_shared_child_actors'
+        values: '3x60'
+      - series: 'loadlab_shared_overcount_bytes'
+        values: '16777216x60'
+      - series: 'loadlab_workload_running'
+        values: '1x60'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: LoadlabSharedNotConverging
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: LoadlabSharedSaturated
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: LoadlabSharedOvercountUnexpected
+        exp_alerts: []
+  # An unconverged shared controller that is under the ceiling is a real convergence failure and must
+  # page even though the request is nowhere near the limit.
+  - interval: 15s
+    input_series:
+      - series: 'loadlab_shared_segment_bytes'
+        values: '8388608x60'
+      - series: 'loadlab_shared_target_cow_bytes'
+        values: '8388608x60'
+      - series: 'loadlab_shared_requested_cow_bytes'
+        values: '8388608x60'
+      - series: 'loadlab_configured_max_shared_bytes'
+        values: '41943040x60'
+      - series: 'loadlab_shared_saturated'
+        values: '0x60'
+      - series: 'loadlab_shared_converged'
+        values: '0x60'
+      - series: 'loadlab_shared_child_actors'
+        values: '3x60'
+      - series: 'loadlab_shared_overcount_bytes'
+        values: '16777216x60'
+      - series: 'loadlab_workload_running'
+        values: '1x60'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: LoadlabSharedNotConverging
+        exp_alerts:
+          - exp_labels:
+              alertname: LoadlabSharedNotConverging
+              severity: warning
+            exp_annotations:
+              summary: >-
+                loadlab is not holding the requested shared-memory residency
+              description: >-
+                The shared-memory controller has been off target for five minutes. Compare `loadlab_shared_cow_physical_bytes` against `loadlab_shared_target_cow_bytes` for the gap itself, and `loadlab_shared_actors` against what was requested for actors that keep dying and being replaced.
+      - eval_time: 15m
+        alertname: LoadlabSharedSaturated
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: LoadlabSharedOvercountUnexpected
+        exp_alerts: []
+  # The invariant the overcount alert exists for: several actors mapping the segment must produce a
+  # positive double-count. A zero overcount with a live child is the failure it is written to catch.
+  - interval: 15s
+    input_series:
+      - series: 'loadlab_shared_segment_bytes'
+        values: '8388608x60'
+      - series: 'loadlab_shared_target_cow_bytes'
+        values: '8388608x60'
+      - series: 'loadlab_shared_requested_cow_bytes'
+        values: '8388608x60'
+      - series: 'loadlab_configured_max_shared_bytes'
+        values: '41943040x60'
+      - series: 'loadlab_shared_saturated'
+        values: '0x60'
+      - series: 'loadlab_shared_converged'
+        values: '1x60'
+      - series: 'loadlab_shared_child_actors'
+        values: '3x60'
+      - series: 'loadlab_shared_overcount_bytes'
+        values: '0x60'
+      - series: 'loadlab_workload_running'
+        values: '1x60'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: LoadlabSharedNotConverging
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: LoadlabSharedSaturated
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: LoadlabSharedOvercountUnexpected
+        exp_alerts:
+          - exp_labels:
+              alertname: LoadlabSharedOvercountUnexpected
+              severity: warning
+            exp_annotations:
+              summary: >-
+                loadlab shared segment is mapped by several actors but not overcounted
+              description: >-
+                More than one actor has the segment mapped, so summing Rss across them must count it more than once, yet `loadlab_shared_overcount_bytes` is not positive. Either the accounting is wrong or the segment is not actually shared; both make the number an operator sizes machines with wrong.
+
+  # Huge pages were requested, the host allows them, the arena is large, and the measured huge-page
+  # fraction is still low. This is the condition the alert exists for: a request the kernel is not
+  # honouring.
+  - interval: 15s
+    input_series:
+      - series: 'loadlab_thp_requested{policy="always"}'
+        values: '1x60'
+      - series: 'loadlab_thp_requested{policy="madvise"}'
+        values: '0x60'
+      - series: 'loadlab_thp_host{policy="always"}'
+        values: '1x60'
+      - series: 'loadlab_thp_host{policy="madvise"}'
+        values: '0x60'
+      - series: 'loadlab_memory_rss_anon_bytes'
+        values: '268435456x60'
+      - series: 'loadlab_memory_anon_huge_pages_bytes'
+        values: '0x60'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: LoadlabThpRequestIgnored
+        exp_alerts:
+          - exp_labels:
+              alertname: LoadlabThpRequestIgnored
+              severity: warning
+            exp_annotations:
+              summary: >-
+                loadlab asked for huge pages but its arena is not using them
+              description: >-
+                The workload requested huge pages and the host allows them, but under half of the anonymous arena has been backed by huge pages for fifteen minutes. The kernel may be deferring the work to khugepaged, or the arena alignment may be preventing it. Compare `loadlab_memory_anon_huge_pages_bytes` against `loadlab_memory_rss_anon_bytes`.
+  # The host is pinned to `never`, so the request cannot be honoured. That is a provisioning fact
+  # rather than a loadlab fault, and the host guard is what keeps this quiet.
+  - interval: 15s
+    input_series:
+      - series: 'loadlab_thp_requested{policy="always"}'
+        values: '1x60'
+      - series: 'loadlab_thp_host{policy="never"}'
+        values: '1x60'
+      - series: 'loadlab_memory_rss_anon_bytes'
+        values: '268435456x60'
+      - series: 'loadlab_memory_anon_huge_pages_bytes'
+        values: '0x60'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: LoadlabThpRequestIgnored
+        exp_alerts: []
+  # A healthy arena: the request is honoured, so the huge-page fraction is high.
+  - interval: 15s
+    input_series:
+      - series: 'loadlab_thp_requested{policy="always"}'
+        values: '1x60'
+      - series: 'loadlab_thp_host{policy="always"}'
+        values: '1x60'
+      - series: 'loadlab_memory_rss_anon_bytes'
+        values: '268435456x60'
+      - series: 'loadlab_memory_anon_huge_pages_bytes'
+        values: '268435456x60'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: LoadlabThpRequestIgnored
+        exp_alerts: []
+  # A small arena: the fraction is meaningless at this size, so the size guard keeps it quiet even
+  # though no huge pages have appeared yet.
+  - interval: 15s
+    input_series:
+      - series: 'loadlab_thp_requested{policy="madvise"}'
+        values: '1x60'
+      - series: 'loadlab_thp_host{policy="always"}'
+        values: '1x60'
+      - series: 'loadlab_memory_rss_anon_bytes'
+        values: '16777216x60'
+      - series: 'loadlab_memory_anon_huge_pages_bytes'
+        values: '0x60'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: LoadlabThpRequestIgnored
+        exp_alerts: []
+
+  # The filesystem is delivering one eighth of the requested read rate, so the measured shortfall is
+  # 87.5%. The write direction has no request, so it does not distort the maximum the recording rule
+  # takes -- which is what the label_replace/max construction is there to guarantee.
+  - interval: 15s
+    input_series:
+      - series: 'loadlab_io_read_bps'
+        values: '8388608x60'
+      - series: 'loadlab_io_read_bps_actual'
+        values: '1048576x60'
+      - series: 'loadlab_io_write_bps'
+        values: '0x60'
+      - series: 'loadlab_io_write_bps_actual'
+        values: '0x60'
+      - series: 'loadlab_workload_running'
+        values: '1x60'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: LoadlabIoThroughputFarBelowTarget
+        exp_alerts:
+          - exp_labels:
+              alertname: LoadlabIoThroughputFarBelowTarget
+              severity: warning
+            exp_annotations:
+              summary: >-
+                loadlab is moving far less I/O than it was asked for
+              description: >-
+                Measured I/O throughput is 87.5% below the request for five minutes. The filesystem is refusing the load: compare `loadlab_io_read_bps_actual` and `loadlab_io_write_bps_actual` against the requested gauges, and check `loadlab_io_fsyncs_per_second` if the writes are meant to be durable.
+
+  # Measured throughput at the request: nothing to page about.
+  - interval: 15s
+    input_series:
+      - series: 'loadlab_io_read_bps'
+        values: '8388608x60'
+      - series: 'loadlab_io_read_bps_actual'
+        values: '8388608x60'
+      - series: 'loadlab_io_write_bps'
+        values: '1048576x60'
+      - series: 'loadlab_io_write_bps_actual'
+        values: '1048576x60'
+      - series: 'loadlab_workload_running'
+        values: '1x60'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: LoadlabIoThroughputFarBelowTarget
+        exp_alerts: []
+
+  # A request above the operations ceiling is saturated, not merely unconverged. The guard on
+  # LoadlabNetworkNotConverging is what keeps this from paging twice for a single misconfiguration.
+  - interval: 15s
+    input_series:
+      - series: 'loadlab_network_saturated'
+        values: '1x60'
+      - series: 'loadlab_network_messages_per_second'
+        values: '80000x60'
+      - series: 'loadlab_network_connections_per_second'
+        values: '30000x60'
+      - series: 'loadlab_configured_max_network_ops_per_second'
+        values: '100000x60'
+      - series: 'loadlab_network_converged'
+        values: '0x60'
+      - series: 'loadlab_workload_running'
+        values: '1x60'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: LoadlabNetworkNotConverging
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: LoadlabNetworkSaturated
+        exp_alerts:
+          - exp_labels:
+              alertname: LoadlabNetworkSaturated
+              severity: warning
+            exp_annotations:
+              summary: >-
+                loadlab network target exceeds the operator operations ceiling
+              description: >-
+                The network request has exceeded the operations ceiling for ten minutes, so the generator is pinned at the limit however high the target goes. Compare requested rates against `loadlab_configured_max_network_ops_per_second`, raise --max-network-ops-per-second, or lower the requested rates.
+
+  # An unconverged network generator under the ceiling is a real convergence failure and must page.
+  - interval: 15s
+    input_series:
+      - series: 'loadlab_network_saturated'
+        values: '0x60'
+      - series: 'loadlab_network_messages_per_second'
+        values: '50000x60'
+      - series: 'loadlab_network_connections_per_second'
+        values: '10000x60'
+      - series: 'loadlab_configured_max_network_ops_per_second'
+        values: '100000x60'
+      - series: 'loadlab_network_converged'
+        values: '0x60'
+      - series: 'loadlab_workload_running'
+        values: '1x60'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: LoadlabNetworkNotConverging
+        exp_alerts:
+          - exp_labels:
+              alertname: LoadlabNetworkNotConverging
+              severity: warning
+            exp_annotations:
+              summary: >-
+                loadlab is not holding the requested network rate
+              description: >-
+                The network generator has been off target for five minutes. Compare `loadlab_network_messages_per_second_actual` and `loadlab_network_connections_per_second_actual` against requested rates, and check `loadlab_network_errors_total` for connection or write failures.
+      - eval_time: 15m
+        alertname: LoadlabNetworkSaturated
+        exp_alerts: []
+
+  # A healthy network workload pages nothing.
+  - interval: 15s
+    input_series:
+      - series: 'loadlab_network_saturated'
+        values: '0x60'
+      - series: 'loadlab_network_messages_per_second'
+        values: '5000x60'
+      - series: 'loadlab_network_connections_per_second'
+        values: '100x60'
+      - series: 'loadlab_configured_max_network_ops_per_second'
+        values: '100000x60'
+      - series: 'loadlab_network_converged'
+        values: '1x60'
+      - series: 'loadlab_workload_running'
+        values: '1x60'
+      - series: 'loadlab_network_errors_total'
+        values: '0x60'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: LoadlabNetworkNotConverging
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: LoadlabNetworkSaturated
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: LoadlabNetworkErrors
+        exp_alerts: []
+
+  # A stopped network workload does not page when unconverged.
+  - interval: 15s
+    input_series:
+      - series: 'loadlab_network_saturated'
+        values: '0x60'
+      - series: 'loadlab_network_messages_per_second'
+        values: '0x60'
+      - series: 'loadlab_network_connections_per_second'
+        values: '0x60'
+      - series: 'loadlab_configured_max_network_ops_per_second'
+        values: '100000x60'
+      - series: 'loadlab_network_converged'
+        values: '0x60'
+      - series: 'loadlab_workload_running'
+        values: '0x60'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: LoadlabNetworkNotConverging
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: LoadlabNetworkSaturated
+        exp_alerts: []

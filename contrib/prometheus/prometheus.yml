@@ -1,0 +1,33 @@
+# Prometheus configuration for loadlab.
+#
+# The service binds to loopback, so a Prometheus on another host needs a tunnel open first:
+#
+#   ssh -N -L 8080:127.0.0.1:8080 loadlab-host
+#
+# Then point this file at your Prometheus and check it:
+#
+#   promtool check config contrib/prometheus/prometheus.yml
+#
+# The scrape target lives in targets.json rather than inline, so the same config and the same alert
+# rules serve both a host-local Prometheus and the docker-compose stack, which differs only in
+# whether 127.0.0.1 means the host or the container.
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    monitor: loadlab
+
+rule_files:
+  - loadlab.rules.yml
+
+scrape_configs:
+  - job_name: loadlab
+    metrics_path: /prometheus
+    # 15s is deliberate. Every scrape reads /proc/self/smaps_rollup, which walks the page tables and
+    # gets more expensive as the arena grows; at 1s against a 600 MiB arena that is measurable CPU.
+    # See the "Scraping cost" section of ../../docs/src/http-api/metrics.md.
+    scrape_interval: 15s
+    file_sd_configs:
+      - files: [targets.json]
+        refresh_interval: 30s

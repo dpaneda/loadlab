@@ -1,0 +1,16 @@
+apiVersion: 1
+
+# The dashboard picks its datasource through a `datasource` template variable rather than a
+# hardcoded uid, so it works against this provisioned datasource and against one you already had
+# in an existing Grafana.
+datasources:
+  - name: Prometheus
+    uid: prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: true
+    jsonData:
+      httpMethod: POST
+      timeInterval: 15s

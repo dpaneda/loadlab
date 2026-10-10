@@ -1,0 +1,32 @@
+[Unit]
+Description=loadlab network sink (discarding TCP/UDP blackhole)
+Documentation=file:///usr/local/share/doc/loadlab/deploy.md
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/var/lib/loadlab
+
+# A discarding sink on loopback, so a network workload can be run without an external destination.
+# Sink mode starts neither the controller nor the HTTP API: it accepts connections and datagrams and
+# throws them away. The address is the target a workload points `network.target` at.
+ExecStart=/usr/local/bin/loadlab --sink 127.0.0.1:9000
+
+Restart=on-failure
+RestartSec=5
+
+# The sink reads and discards; it never writes to disk and never allocates unbounded memory, so it
+# needs none of the file-backed or anonymous allowances the main unit has. It is still a hostile-
+# input surface (it accepts whatever a workload sends), so it keeps the same sandbox.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictNamespaces=true
+RestrictRealtime=true
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target

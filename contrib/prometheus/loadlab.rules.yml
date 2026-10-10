@@ -1,0 +1,403 @@
+# Alerting and recording rules for loadlab.
+#
+# Two are worth having from the start, and the third only if the ceiling matters to you. See
+# ../../docs/src/http-api/metrics.md for why each one is written the way it is.
+#
+# Validate with:
+#   promtool check rules contrib/prometheus/loadlab.rules.yml
+#
+# Note what is *not* here: there is no `up`-based alert. The controller runs on its own thread, so
+# a wedged controller leaves the HTTP server answering perfectly well and a scrape-success alert
+# would stay green through the failure you actually care about.
+groups:
+  - name: loadlab-recording
+    interval: 15s
+    rules:
+      # The staleness budget, resolved from the configured tick so that changing `tick_ms` at
+      # runtime does not silently invalidate the alert.
+      - record: loadlab:controller_staleness_limit_seconds
+        expr: 5 * loadlab_configured_tick_ms / 1000
+
+      # Distance to the ceiling in bytes. Negative means the operator's own limit is already
+      # breached, which is the one condition that should page.
+      - record: loadlab:headroom_bytes
+        expr: loadlab_configured_max_memory_bytes - loadlab_memory_peak_rss_bytes
+
+      # Headroom as a fraction, which is the shape a threshold is naturally written in.
+      - record: loadlab:headroom_ratio
+        expr: 1 - (loadlab_memory_peak_rss_bytes / loadlab_configured_max_memory_bytes)
+
+      # How far CPU is from what was asked for, positive meaning short. Recorded rather than
+      # written inline so the alert can compare it against the tolerance the controller is
+      # actually using instead of a second copy of the number.
+      - record: loadlab:cpu_shortfall_percent
+        expr: loadlab_cpu_requested_utilization_percent - loadlab_cpu_actual_utilization_percent
+
+      # Fraction of the operator's disk ceiling the file-backed file has reached.
+      #
+      # This is the disk equivalent of `loadlab:headroom_ratio` and exists for the same reason:
+      # the interesting question is not "how big is the file" but "how close is it to the limit I
+      # set". The file's high-water length is never truncated back down, so this only ever rises
+      # while the process lives, and a workload that peaks high leaves the file large even after
+      # its target falls.
+      - record: loadlab:file_backed_ceiling_ratio
+        expr: loadlab_file_backed_file_bytes / loadlab_configured_max_file_backed_bytes
+
+      # Fraction of the combined shared ceiling the segment plus the applied copy-on-write budget
+      # occupies. `target_cow_bytes` rather than `requested_cow_bytes` because the target is what
+      # was charged to the host; the request is what the saturation alert below reads.
+      - record: loadlab:shared_ceiling_ratio
+        expr: >-
+          (loadlab_shared_segment_bytes + loadlab_shared_target_cow_bytes)
+          / loadlab_configured_max_shared_bytes
+
+      # Fraction of the anonymous arena actually backed by huge pages. THP is a request: the
+      # `loadlab_thp_requested` series says what the workload asked for, not what it got. This is
+      # the measurement that says whether the kernel honoured it.
+      - record: loadlab:thp_huge_fraction
+        expr: loadlab_memory_anon_huge_pages_bytes / clamp_min(loadlab_memory_rss_anon_bytes, 1)
+
+      # How far measured I/O throughput is below the request, as a fraction of the request, for
+      # whichever direction is short. The two one-series expressions are given distinct labels with
+      # `label_replace` so `or` keeps both and `max` can pick the worse one; without that, `or`
+      # would drop the second because both have an empty label set.
+      - record: loadlab:io_throughput_shortfall_ratio
+        expr: >-
+          max by () (
+            label_replace(
+              (loadlab_io_read_bps - loadlab_io_read_bps_actual) / clamp_min(loadlab_io_read_bps, 1),
+              "direction", "read", "", ""
+            )
+            or
+            label_replace(
+              (loadlab_io_write_bps - loadlab_io_write_bps_actual) / clamp_min(loadlab_io_write_bps, 1),
+              "direction", "write", "", ""
+            )
+          )
+
+      # How far measured network message throughput is below the request, as a fraction of the
+      # request. Zero when messages are not requested.
+      - record: loadlab:network_messages_shortfall_ratio
+        expr: >-
+          (loadlab_network_messages_per_second - loadlab_network_messages_per_second_actual)
+          / clamp_min(loadlab_network_messages_per_second, 1)
+
+      # Fraction of the operator's network operations ceiling being requested.
+      - record: loadlab:network_ops_ceiling_ratio
+        expr: >-
+          (loadlab_network_messages_per_second + loadlab_network_connections_per_second)
+          / clamp_min(loadlab_configured_max_network_ops_per_second, 1)
+
+  - name: loadlab-alerts
+    rules:
+      - alert: LoadlabControllerStale
+        expr: loadlab_controller_last_tick_age_seconds > loadlab:controller_staleness_limit_seconds
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: loadlab controller is not converging
+          description: >-
+            The last controller tick was {{ $value | humanizeDuration }} ago, over the budget of
+            five times the configured tick_ms. The API still answers, so a scrape-based alert would
+            miss this: the workload is silently not tracking.
+
+      - alert: LoadlabControllerReconcileErrors
+        expr: increase(loadlab_controller_reconcile_errors_total[15m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: loadlab controller is failing to reconcile
+          description: >-
+            {{ $value | printf "%.0f" }} failed ticks in the last 15m. The instantaneous
+            `loadlab_controller_error` flag has already cleared, which is exactly why this counter
+            exists.
+
+      - alert: LoadlabNearMemoryCeiling
+        expr: loadlab:headroom_ratio < 0.10
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: loadlab peak RSS is within 10% of the operator ceiling
+          description: >-
+            {{ $value | humanizePercentage }} of the ceiling is in use by the high-water mark. On a
+            host with no swap this is the OOM path.
+
+      - alert: LoadlabNearMemoryCeilingCritical
+        expr: loadlab:headroom_bytes < 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: loadlab peak RSS has passed the operator ceiling
+          description: >-
+            The high-water mark exceeds the ceiling the operator set by
+            {{ $value | humanize1024 }}B. Either the workload target was raised past what the host
+            can hold, or a spike landed between scrapes.
+
+      # CPU has its own pair, because a workload can be perfectly converged on memory and still
+      # be wrong about CPU for entirely unrelated reasons: not enough workers to deliver the
+      # request, a target that moves faster than the tick, or a machine too contended to give
+      # back the CPU that was asked for.
+      #
+      # The shortfall is compared against the controller's own tolerance, and the request is
+      # required to be at least one measurement resolution. Both guards matter. Without the
+      # first this would be a second copy of a constant that can be changed at runtime; without
+      # the second it would fire on targets the measurement is too coarse to check, where
+      # `converged` honestly means "as close as can be seen" rather than "verified".
+      #
+      # Saturated is excluded, deliberately. A pool asked for more than it can deliver is both
+      # not converged and over its tolerance, but that is one condition with one fix -- more
+      # workers -- and it has its own alert below. Two alerts paging for a single
+      # misconfiguration is how an alert rule teaches people to ignore alerts.
+      - alert: LoadlabCpuNotConverging
+        expr: >-
+          loadlab:cpu_shortfall_percent > loadlab_configured_cpu_tolerance_percent
+          and loadlab_cpu_requested_utilization_percent >= loadlab_cpu_measurement_resolution_percent
+          and loadlab_cpu_saturated == 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: loadlab is delivering less CPU than it was asked for
+          description: >-
+            CPU is {{ $value | humanize }} points of a core short of the request, past the
+            {{ $value | humanize }} point tolerance, and has been for five minutes. Check
+            `loadlab_cpu_workers` against `loadlab_configured_cpu_workers` for a pool that was
+            never rebuilt, and `loadlab_cpu_duty_cycle` for a target the machine is refusing.
+
+      # Distinct from the alert above on purpose: a saturated pool is not failing to converge,
+      # it is correctly reporting that it cannot deliver what was asked for. The fix is to add
+      # workers, so this is a configuration condition rather than a fault, and it is warning
+      # rather than critical.
+      - alert: LoadlabCpuSaturated
+        expr: >-
+          loadlab_cpu_saturated == 1
+          and loadlab_cpu_requested_utilization_percent > loadlab_cpu_capacity_percent
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: loadlab has more CPU requested than it has workers to deliver
+          description: >-
+            The request has exceeded the pool's capacity for ten minutes, so the delivered load is
+            pinned at {{ $value | humanize }} percent of a core however high the target goes. Raise
+            `cpu.workers`, or lower the request.
+
+      # File-backed memory has its own pair, for the same reason CPU does: a workload can be
+      # perfectly converged on anonymous memory and still be wrong about file-backed memory, and
+      # the two ceilings are independent. A controller that is tracking its anonymous arena
+      # exactly gives no evidence about the file.
+      #
+      # Saturated is excluded from the "not converging" alert because it is a separate condition
+      # with a separate fix -- raise the disk ceiling or lower the request -- and it has its own
+      # alert below. Two alerts paging for one misconfiguration is how an alert rule teaches
+      # people to ignore alerts.
+      - alert: LoadlabFileBackedNotConverging
+        expr: >-
+          loadlab_file_backed_converged == 0
+          and loadlab_file_backed_saturated == 0
+          and loadlab_workload_running == 1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: loadlab is not holding the requested file-backed residency
+          description: >-
+            The file-backed controller has been off target for five minutes. No byte count is
+            templated here: this alert fires on a conjunction of comparisons, so `$value` is the
+            boolean 0 rather than a size. Compare
+            `loadlab_file_backed_rss_bytes` against `loadlab_file_backed_requested_rss_bytes` for
+            the gap itself, `loadlab_file_backed_target_rss_bytes` for a request that was clamped,
+            and `loadlab_file_backed_actual_pages_per_second` for an access loop the machine will
+            not sustain.
+
+      # Distinct from the alert above on purpose: a request above the disk ceiling is correctly
+      # reporting that it cannot have what it asked for. The fix is to raise the ceiling or lower
+      # the target, so it is a configuration condition rather than a fault.
+      - alert: LoadlabFileBackedSaturated
+        expr: >-
+          loadlab_file_backed_saturated == 1
+          and loadlab_file_backed_requested_rss_bytes > loadlab_file_backed_target_rss_bytes
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: loadlab file-backed target exceeds the operator disk ceiling
+          description: >-
+            The request has exceeded the disk ceiling for ten minutes, so the file is pinned at
+            its limit however high the target goes. Compare
+            `loadlab_file_backed_requested_rss_bytes` against
+            `loadlab_configured_max_file_backed_bytes`, raise --max-file-backed-bytes, or lower
+            file_backed.rss. No byte count is templated here because $value is the boolean
+            condition, not a size.
+
+      # The disk condition, which has no anonymous-memory equivalent. The file's length only ever
+      # grows while the process lives, so this stays fired after a high peak even once the target
+      # has fallen -- that is intended, because the space is still allocated.
+      - alert: LoadlabNearFileBackedCeiling
+        expr: loadlab:file_backed_ceiling_ratio > 0.90
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: loadlab file-backed file is within 10% of the operator disk ceiling
+          description: >-
+            {{ $value | humanizePercentage }} of the disk ceiling is allocated. On a host where
+            the file lives on the root filesystem this is the ENOSPC path, and the file is never
+            truncated back down, so this does not clear by lowering the target.
+
+      # Shared memory has its own pair, for the same reason CPU and file-backed memory do: a
+      # workload can be converged on its anonymous arena and still be wrong about the segment its
+      # actors share. The ceiling is combined -- the segment plus every actor's copy-on-write -- so
+      # `saturated` covers both in one condition.
+      - alert: LoadlabSharedNotConverging
+        expr: >-
+          loadlab_shared_converged == 0
+          and loadlab_shared_saturated == 0
+          and loadlab_workload_running == 1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: loadlab is not holding the requested shared-memory residency
+          description: >-
+            The shared-memory controller has been off target for five minutes. Compare
+            `loadlab_shared_cow_physical_bytes` against `loadlab_shared_target_cow_bytes` for the
+            gap itself, and `loadlab_shared_actors` against what was requested for actors that
+            keep dying and being replaced.
+
+      # Distinct from the alert above on purpose: a request above the combined ceiling is correctly
+      # reporting that it cannot have what it asked for, so the fix is the ceiling or the request
+      # rather than a fault. The guard on LoadlabSharedNotConverging is what stops this paging
+      # twice for one misconfiguration.
+      - alert: LoadlabSharedSaturated
+        expr: >-
+          loadlab_shared_saturated == 1
+          and loadlab_shared_requested_cow_bytes > loadlab_shared_target_cow_bytes
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: loadlab shared target exceeds the operator ceiling
+          description: >-
+            The copy-on-write request has exceeded the combined shared ceiling for ten minutes, so
+            the per-actor private view is pinned below what was asked for however high the target
+            goes. Compare `loadlab_shared_requested_cow_bytes` against
+            `loadlab_configured_max_shared_bytes`, raise --max-shared-bytes, or lower
+            shared.private_bytes. No byte count is templated here because $value is the boolean
+            condition, not a size.
+
+      # The double-count is the reason this controller exists, so it gets an invariant alert rather
+      # than a threshold: if more than one actor has the segment mapped, summing Rss across them
+      # must count it more than once. A non-positive overcount with a live child means either the
+      # accounting is wrong or the segment is not actually shared, and in both cases the number an
+      # operator sizes machines with is wrong.
+      - alert: LoadlabSharedOvercountUnexpected
+        expr: >-
+          loadlab_shared_child_actors > 0
+          and loadlab_shared_overcount_bytes <= 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: loadlab shared segment is mapped by several actors but not overcounted
+          description: >-
+            More than one actor has the segment mapped, so summing Rss across them must count it
+            more than once, yet `loadlab_shared_overcount_bytes` is not positive. Either the
+            accounting is wrong or the segment is not actually shared; both make the number an
+            operator sizes machines with wrong.
+
+      # THP is a request, so the alert reads the measured fraction rather than trusting what was
+      # asked for. Every guard matters: without the host check this would page on a host pinned to
+      # `never`, which is a provisioning fact rather than a loadlab fault; without the size check it
+      # would fire on a tiny arena where a single 4 KiB page distorts the fraction.
+      - alert: LoadlabThpRequestIgnored
+        expr: >-
+          max(loadlab_thp_requested{policy=~"always|madvise"}) == 1
+          and max(loadlab_thp_host{policy=~"always|madvise"}) == 1
+          and max(loadlab_memory_rss_anon_bytes) > 67108864
+          and max(loadlab:thp_huge_fraction) < 0.5
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: loadlab asked for huge pages but its arena is not using them
+          description: >-
+            The workload requested huge pages and the host allows them, but under half of the
+            anonymous arena has been backed by huge pages for fifteen minutes. The kernel may be
+            deferring the work to khugepaged, or the arena alignment may be preventing it. Compare
+            `loadlab_memory_anon_huge_pages_bytes` against `loadlab_memory_rss_anon_bytes`.
+
+      # I/O has its own alert, for the same reason CPU, file-backed memory and shared memory do: a
+      # workload can be perfectly converged on memory and still be getting a fraction of the disk
+      # throughput it asked for. The shortfall is measured rather than implied by the request,
+      # because the filesystem -- not the controller -- is usually what refuses the load.
+      - alert: LoadlabIoThroughputFarBelowTarget
+        expr: >-
+          loadlab:io_throughput_shortfall_ratio > 0.10
+          and loadlab_workload_running == 1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: loadlab is moving far less I/O than it was asked for
+          description: >-
+            Measured I/O throughput is {{ $value | humanizePercentage }} below the request for five
+            minutes. The filesystem is refusing the load: compare `loadlab_io_read_bps_actual` and
+            `loadlab_io_write_bps_actual` against the requested gauges, and check
+            `loadlab_io_fsyncs_per_second` if the writes are meant to be durable.
+
+      # Socket errors indicate dropped connections, connect timeouts, or failed datagram sends.
+      # Like controller reconcile errors, `loadlab_network_errors_total` accumulates every failure
+      # so transient disconnects and unreachable targets remain visible.
+      - alert: LoadlabNetworkErrors
+        expr: increase(loadlab_network_errors_total[15m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: loadlab network generator is encountering socket errors
+          description: >-
+            {{ $value | printf "%.0f" }} failed socket operations (connects, writes, or sends) in
+            the last 15m. Compare with `loadlab_network_errors_total` and check whether the target
+            is reachable, accepting connections, and not dropping traffic.
+
+      # Network has its own convergence alert: a workload can be converged on memory and CPU while
+      # falling short of requested network rates because of link congestion or peer slowness.
+      - alert: LoadlabNetworkNotConverging
+        expr: >-
+          loadlab_network_converged == 0
+          and loadlab_network_saturated == 0
+          and loadlab_workload_running == 1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: loadlab is not holding the requested network rate
+          description: >-
+            The network generator has been off target for five minutes. Compare
+            `loadlab_network_messages_per_second_actual` and
+            `loadlab_network_connections_per_second_actual` against requested rates, and check
+            `loadlab_network_errors_total` for connection or write failures.
+
+      # Distinct from the alert above: a request above the operator's operations ceiling is
+      # correctly reporting that it cannot have what it asked for. The fix is to raise the
+      # ceiling (--max-network-ops-per-second) or lower the request.
+      - alert: LoadlabNetworkSaturated
+        expr: >-
+          loadlab_network_saturated == 1
+          and (loadlab_network_messages_per_second + loadlab_network_connections_per_second)
+          > loadlab_configured_max_network_ops_per_second
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: loadlab network target exceeds the operator operations ceiling
+          description: >-
+            The network request has exceeded the operations ceiling for ten minutes, so the
+            generator is pinned at the limit however high the target goes. Compare requested
+            rates against `loadlab_configured_max_network_ops_per_second`, raise
+            --max-network-ops-per-second, or lower the requested rates.
