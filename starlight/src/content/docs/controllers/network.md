@@ -2,18 +2,6 @@
 title: "Network"
 ---
 
-> **In short.** `network.messages_per_second` and `network.connections_per_second` generate raw
-> TCP or UDP traffic against one target `host:port` — kernel-stack load, not HTTP requests. A
-> target of `""` (the default) generates nothing; pair it with `--sink` to run fully locally.
-> Minimal form:
->
-> ```json
-> {"network":{"transport":"tcp","target":"127.0.0.1:9099","messages_per_second":5000,"message_size":1024}}
-> ```
->
-> What to watch in `GET /metrics` under `controller.network`: each requested rate next to its
-> `*_actual` counterpart, `bytes_per_second_actual`, `saturated`, `converged`.
-
 `network.messages_per_second` and `network.connections_per_second` generate raw TCP or UDP traffic
 against a remote target `host:port`. This is deliberately not an HTTP client: the useful question
 for a Linux workload laboratory is what the *kernel network stack* does under raw load, leaving

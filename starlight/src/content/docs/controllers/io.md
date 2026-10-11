@@ -2,17 +2,6 @@
 title: "Disk I/O"
 ---
 
-> **In short.** `io.read_bps`, `io.write_bps` and `io.fsync_rate` generate reads, writes and
-> durability traffic against a temporary file loadlab owns — how fast a filesystem actually moves
-> bytes, measured rather than asserted. Bounded by `--max-io-bytes`. Minimal form:
->
-> ```json
-> {"io":{"read_bps":"8MiB","write_bps":"8MiB","queue_depth":8,"block_size":4096}}
-> ```
->
-> What to watch in `GET /metrics` under `controller.io`: each requested rate next to its `*_actual`
-> counterpart, and `converged` per direction.
-
 `io.read_bps` and `io.write_bps` generate reads and writes against a temporary file loadlab
 creates and owns, and `io.fsync_rate` adds durability traffic on top. This is the controller that
 turns loadlab from a memory tool into a disk one: the file-backed controller measures how much

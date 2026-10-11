@@ -23,8 +23,8 @@ controller says so rather than rounding up to the target.
   expressions at a glance.
 - **[Going further](../examples/)** — workloads that ramp, breathe and layer, all in expressions.
 - **[Expressions](../expressions/)** — the full expression language: `t`, units, grammar, clamping.
-- **[Controllers](../controllers/overview/)** — the catalog of what exists and what each one is
-  for, then one page per controller.
+- **[Controllers](../controllers/cpu/)** — one page per resource dimension: what it models, what
+  it observes, and what it refuses to fake. The catalog lives in [Core concepts](../concepts/).
 - **[HTTP API](../http-api/authentication/)** — every endpoint, field and error code.
 - **[Reference](../configuration/)** — the process flags, the host, the internal model, and how to
   deploy it.

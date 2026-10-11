@@ -32,8 +32,8 @@ workload itself can be a shape: a ramp, a sinusoid, a plateau.
 | `io` | disk I/O | reads, writes and `fsync` on a scratch file | `read_bps`, `write_bps`, `iops` |
 | `network` | network traffic | TCP/UDP connections and messages to a target | `connections_per_second`, `messages_per_second` |
 
-Every one of them defaults to doing nothing, and every one is a chapter of its own in
-[Controllers](../controllers/overview/).
+Every one of them defaults to doing nothing, and each one has a chapter of its own in the
+[Controllers](../controllers/cpu/) section — start with [CPU utilization](../controllers/cpu/).
 
 ## Expressions at a glance
 

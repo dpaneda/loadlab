@@ -2,11 +2,6 @@
 title: "Transparent huge pages"
 ---
 
-> **In short.** `memory.thp` asks the kernel to back the anonymous arena with transparent huge
-> pages (`"default"`, `"madvise"`, `"always"` or `"never"`). It is a request, not a guarantee —
-> the host has the last word — and the honest truth is the measured `AnonHugePages`, not the
-> policy string.
-
 `memory.thp` asks the kernel to back the anonymous arena with transparent huge pages (THP). It
 takes four values and defaults to `"default"`:
 

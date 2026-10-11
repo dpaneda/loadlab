@@ -2,17 +2,6 @@
 title: "CPU utilization"
 ---
 
-> **In short.** `cpu.utilization` burns CPU time in percentage points of a single logical CPU —
-> `100` is one saturated core, `200` is two. A pool of worker threads spins and sleeps on a duty
-> cycle shaped by the target, which can be an expression in `t`. Minimal form:
->
-> ```json
-> {"cpu":{"utilization":"150","workers":2}}
-> ```
->
-> What to watch in `GET /metrics` under `controller.cpu`: `requested_utilization_pct`,
-> `target_utilization_pct`, `actual_utilization_pct`, `worker_count`, `saturated`, `converged`.
-
 `cpu.utilization` is a number or an expression in **percent of a single logical CPU**, so `100` is one
 saturated core, `200` is two, and `400` is four. It is not a percentage of the host: on a
 sixteen-core machine `800` saturates the whole machine, and there is no separate "of the host"

@@ -23,7 +23,6 @@ export default defineConfig({
         {
           label: 'Controllers',
           items: [
-            { slug: 'controllers/overview' },
             { slug: 'controllers/cpu' },
             { slug: 'controllers/memory' },
             { slug: 'controllers/page-access' },
