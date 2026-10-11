@@ -1,7 +1,7 @@
 # Alerting and recording rules for loadlab.
 #
 # Two are worth having from the start, and the third only if the ceiling matters to you. See
-# ../../docs/src/http-api/metrics.md for why each one is written the way it is.
+# ../../starlight/src/content/docs/http-api/metrics.md for why each one is written the way it is.
 #
 # Validate with:
 #   promtool check rules contrib/prometheus/loadlab.rules.yml

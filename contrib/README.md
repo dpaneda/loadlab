@@ -87,8 +87,8 @@ every cycle with a negative target, which the controller clamps to zero. The res
 arena sits empty, `loadlab_controller_target_arena_bytes` reads zero and
 `converged` stays true. A silent flat spot at zero, not a failure.
 
-So keep the mean at or above the amplitude. See `docs/src/deploy.md` for the full table of
-working examples.
+So keep the mean at or above the amplitude. See `starlight/src/content/docs/deploy.md` for the full
+table of working examples.
 
 ## A note on `/metrics` vs the Prometheus scrape
 

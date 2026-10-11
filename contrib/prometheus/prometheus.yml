@@ -26,7 +26,7 @@ scrape_configs:
     metrics_path: /prometheus
     # 15s is deliberate. Every scrape reads /proc/self/smaps_rollup, which walks the page tables and
     # gets more expensive as the arena grows; at 1s against a 600 MiB arena that is measurable CPU.
-    # See the "Scraping cost" section of ../../docs/src/http-api/metrics.md.
+    # See the "Scraping cost" section of ../../starlight/src/content/docs/http-api/metrics.md.
     scrape_interval: 15s
     file_sd_configs:
       - files: [targets.json]

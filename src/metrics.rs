@@ -1,8 +1,8 @@
 //! Prometheus exposition for the process and the controller.
 //!
 //! `/metrics` stays JSON because that is the machine-friendly state endpoint described in
-//! `docs/src/http-api/metrics.md`; this module is the scrape target and lives beside it rather than
-//! replacing it.
+//! `starlight/src/content/docs/http-api/metrics.md`; this module is the scrape target and lives
+//! beside it rather than replacing it.
 //!
 //! The `prometheus` crate does the encoding. It is worth the dependency: it escapes HELP text and
 //! label values, which hand-written output gets wrong the moment either contains a quote or a

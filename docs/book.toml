@@ -1,8 +1,0 @@
-[book]
-title = "loadlab"
-description = "A programmable Linux workload laboratory"
-authors = ["loadlab contributors"]
-language = "en"
-
-[output.html.search]
-enable = true

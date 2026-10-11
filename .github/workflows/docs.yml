@@ -4,15 +4,11 @@ on:
   push:
     branches: [main]
     paths:
-      - "docs/**"
       - "starlight/**"
-      - "landing/**"
       - ".github/workflows/docs.yml"
   pull_request:
     paths:
-      - "docs/**"
       - "starlight/**"
-      - "landing/**"
       - ".github/workflows/docs.yml"
   workflow_dispatch:
 
@@ -31,14 +27,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install mdBook
-        uses: peaceiris/actions-mdbook@v2
-        with:
-          mdbook-version: "0.5.4"
-
-      - name: Build the mdBook
-        run: mdbook build docs
-
       - name: Set up Node
         uses: actions/setup-node@v4
         with:
@@ -47,28 +35,19 @@ jobs:
           cache-dependency-path: starlight/package-lock.json
 
       # `site` and `base` are derived from the repository, so the source carries no host name.
-      - name: Build the Starlight site
+      - name: Build the site
         working-directory: starlight
         env:
           DOCS_SITE: https://${{ github.repository_owner }}.github.io
-          DOCS_BASE: /${{ github.event.repository.name }}/starlight
+          DOCS_BASE: /${{ github.event.repository.name }}
         run: |
           npm ci
           npm run build
 
-      # One Pages artifact, three trees: a landing page at the root, the mdBook under /book and the
-      # Starlight site under /starlight.
-      - name: Assemble the site
-        run: |
-          mkdir -p site
-          cp landing/index.html site/index.html
-          cp -r docs/book site/book
-          cp -r starlight/dist site/starlight
-
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: site
+          path: starlight/dist
 
   deploy:
     needs: build

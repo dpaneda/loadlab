@@ -69,7 +69,7 @@ ssh "$HOST" "sudo systemctl stop loadlab.service loadlab-sink.service >/dev/null
             sudo install -d -m 0755 /usr/local/bin /usr/local/share/doc/loadlab /var/lib/loadlab /etc/systemd/system"
 
 scp -q "$bin" "$HOST:/tmp/loadlab.bin"
-scp -q "$repo/docs/src/deploy.md" "$HOST:/tmp/loadlab-deploy.md"
+scp -q "$repo/starlight/src/content/docs/deploy.md" "$HOST:/tmp/loadlab-deploy.md"
 scp -q "$here/loadlab.service" "$HOST:/tmp/loadlab.service"
 scp -q "$here/loadlab-sink.service" "$HOST:/tmp/loadlab-sink.service"
 

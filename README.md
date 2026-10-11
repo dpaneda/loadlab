@@ -126,7 +126,7 @@ than a step. This covers RSS and page rates, `read_bps`/`write_bps`, `iops`, `fs
 `+ - * /`, `min`, `max`, `sin`, `cos`, `exp`, `log` and constants are available. Byte-valued
 fields expand unit suffixes (`"64MiB"`); dimensionless ones reject them. Counts and choices
 (`workers`, `concurrency`, `io.block_size`, the seeds) stay literal. See
-[the expression contract](docs/src/expressions.md#continuous-magnitudes-a-number-or-an-expression).
+[the expression contract](starlight/src/content/docs/expressions.md).
 
 ### Scenarios
 
@@ -212,13 +212,12 @@ loadlab does not terminate TLS; put it behind a reverse proxy if the port leaves
 ## 🛠️ Development
 
 ```bash
-make check            # cargo check
-make test             # 229 unit + 102 integration tests
-make fmt              # cargo fmt
-make smoke            # scripts/smoke.sh against a running instance
-make docs             # build the mdBook into docs/book
-make docs-starlight   # build the Starlight site into starlight/dist
-make run              # cargo run --release
+make check     # cargo check
+make test      # 229 unit + 102 integration tests
+make fmt       # cargo fmt
+make smoke     # scripts/smoke.sh against a running instance
+make docs      # build the Starlight site into starlight/dist
+make run       # cargo run --release
 ```
 
 `make lint` runs clippy with `-D warnings` and **does not currently pass** — the tree carries
@@ -229,25 +228,18 @@ checks run.
 
 ## 📚 Documentation
 
-The same text is published through two documentation engines, both built and deployed by
-`.github/workflows/docs.yml` as a single GitHub Pages site: a landing page at the root, the mdBook
-under `/book/`, and the Starlight site under `/starlight/`.
-
-- The [mdBook](https://rust-lang.github.io/mdBook/) source is [`docs/src/`](docs/src/); `make docs`
-  builds it into the (gitignored) `docs/book/`. `docs/book.toml` configures it.
-- The [Starlight](https://starlight.astro.build/) site is an independent Astro project under
-  [`starlight/`](starlight/); `make docs-starlight` builds it into the (gitignored)
-  `starlight/dist/`. Its content lives in `starlight/src/content/docs/` and is maintained separately
-  from the mdBook.
-- The landing page is [`landing/index.html`](landing/index.html).
+The documentation is an [Astro Starlight](https://starlight.astro.build/) site under
+[`starlight/`](starlight/). Its content lives in `starlight/src/content/docs/`, `make docs` builds
+it into the (gitignored) `starlight/dist/`, and `.github/workflows/docs.yml` publishes it to GitHub
+Pages.
 
 | Chapter | Contents |
 |---|---|
-| [Introduction](docs/src/introduction.md) | what loadlab is and the model it is built around |
-| [Quick start](docs/src/getting-started.md) | build it, drive it with `curl`, read it back |
-| [Configuration](docs/src/configuration.md) | process flags and their safety ceilings |
-| [Continuous magnitudes](docs/src/expressions.md) | the number-or-expression contract |
-| [Controllers](docs/src/controllers/cpu.md) | CPU, memory, disk I/O and network, one chapter each |
-| [HTTP API](docs/src/http-api/authentication.md) | every endpoint, field and error code |
-| [Architecture](docs/src/architecture.md) · [Deploying](docs/src/deploy.md) | internals and systemd |
+| [Introduction](starlight/src/content/docs/introduction.md) | what loadlab is and the model it is built around |
+| [Quick start](starlight/src/content/docs/getting-started.md) | build it, drive it with `curl`, read it back |
+| [Configuration](starlight/src/content/docs/configuration.md) | process flags and their safety ceilings |
+| [Continuous magnitudes](starlight/src/content/docs/expressions.md) | the number-or-expression contract |
+| [Controllers](starlight/src/content/docs/controllers/cpu.md) | CPU, memory, disk I/O and network, one chapter each |
+| [HTTP API](starlight/src/content/docs/http-api/authentication.md) | every endpoint, field and error code |
+| [Architecture](starlight/src/content/docs/architecture.md) · [Deploying](starlight/src/content/docs/deploy.md) | internals and systemd |
 | [`contrib/`](contrib/) | Grafana dashboard, alert rules, Prometheus and Compose examples |
