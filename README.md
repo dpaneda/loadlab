@@ -8,186 +8,49 @@
 <img alt="MSRV" src="https://img.shields.io/badge/MSRV-1.85-blue.svg">
 </p>
 
-## 🌟 Motivation and Description
+**Documentation: [https://dpaneda.github.io/loadlab/](https://dpaneda.github.io/loadlab/)** — the
+full book: concepts, every controller, the expression language, the HTTP API and how to deploy it.
+This README is the short version.
 
-I wanted to understand how a Linux kernel behaves under a *specific* memory or I/O
-workload, and every tool I reached for measured the machine rather than the workload.
-`stress-ng` tells me it allocated 4 GiB; it does not tell me that `sum(Rss)` across four
-processes says 16 GiB while `sum(Pss)` says 4 GiB.
+## What it is
 
-loadlab is built around one idea:
+loadlab expresses a desired resource workload as **state**. You point a target at a resource
+dimension over HTTP, keep changing your mind while the process runs, and read back what the
+kernel actually measured — never just what was requested:
 
 > Express a desired resource workload as state, change that state over HTTP while the process runs,
 > and converge toward it continuously while reporting what the kernel actually measured.
 
-The interesting part is the third clause. Every controller here is a *model* of a mechanism
-(arena, mapping, page walk, block read) sitting next to an *observation* of the result
-(`/proc/<pid>/smaps_rollup`, fault counters, `schedstat`). A target is never echoed back as an
-achievement: `requested` and `actual` are separate fields everywhere, and an unconverged
-controller says so rather than rounding up to the target.
+- **Independent dimensions.** Anonymous, file-backed and shared memory, page access, CPU, disk
+  I/O and raw TCP/UDP network — each with its own target and its own `/proc` observation.
+- **Requested versus actual is first-class.** The two are separate fields everywhere, and an
+  unconverged controller says so rather than rounding up to its target.
+- **Reproducible.** A per-controller `random_seed` replays the same page and block walks.
+- **A control plane you can `curl`.** No config file, and no restart to change the workload.
 
-## 🤔 Why use loadlab?
+It is a single-host research tool: the observable is the Linux kernel under an intentional
+workload, not an application's throughput. For the latter, use `wrk`, `sysbench`, `fio` or
+`stress-ng`.
 
-Consider using loadlab if you:
-
- - Want each resource dimension targetable **independently**, rather than by one tool that
-   does memory and network together.
- - Need the gap between what you asked for and what the kernel delivered — per controller, live.
- - Want to reproduce page-cache, writeback, reclaim or COW behaviour on purpose, with
-   attribution between the thread generating pressure and everything else.
- - Need a run that is **reproducible**: a per-controller `random_seed` replays the same walk.
- - Prefer a control plane you can `curl` over a config file and a restart.
-
-If you want a throughput number for a database or an HTTP service rather than for the
-kernel underneath it, use the tool built for that — `wrk`, `sysbench`, `fio` or `stress-ng`.
-loadlab has no client library, no scripting protocol and no reporting; the network generator
-speaks raw TCP and UDP and deliberately leaves the application out.
-
-It is a research tool for one host, not a distributed load generator. It binds loopback by
-default and allocates real memory on the machine that runs it.
-
-## 👨‍💻 Getting started
-
-1. Build and run. The API comes up on `http://127.0.0.1:8080`:
+## Quick start
 
 ```bash
-cargo run --release
-```
-
-2. Ask for some anonymous memory and start it:
-
-```bash
+cargo run --release                                   # API on http://127.0.0.1:8080
 curl -s -X PUT localhost:8080/workload \
   -H 'content-type: application/json' \
-  -d '{"memory":{"anonymous_rss":"512MiB"}}'
-
-curl -s -X POST localhost:8080/workload/start
-```
-
-3. Read back what the kernel says, not what was requested. The target and the measurement
-   are separate fields:
-
-```bash
+  -d '{"memory":{"anonymous_rss":"512MiB"}}'          # ask for 512 MiB anonymous RSS
+curl -s -X POST localhost:8080/workload/start         # and run it
 curl -s localhost:8080/metrics | jq '.controller | {last_target_arena_bytes, arena_resident_bytes, convergence_error_bytes, converged}'
-# {
-#   "last_target_arena_bytes": 536317952,
-#   "arena_resident_bytes": 536317952,
-#   "convergence_error_bytes": 0,
-#   "converged": true
-# }
 ```
 
-4. Change your mind while it runs. No restart:
-
-```bash
-curl -s -X PATCH localhost:8080/workload \
-  -H 'content-type: application/json' \
-  -d '{"cpu":{"utilization":"250","workers":4}}'
-```
-
-## 📊 Usage
-
-| Endpoint | What it does |
-|---|---|
-| `PUT /workload` | replace the whole desired state |
-| `PATCH /workload` | merge a partial update into it |
-| `POST /workload/start` / `stop` | run or halt the workload |
-| `GET /state` | the desired state |
-| `GET /metrics` | JSON: host identity and every observation |
-| `GET /prometheus` | the same numbers as a Prometheus exposition |
-| `GET /health` | liveness; the one endpoint that never needs a token |
-
-### What you can drive
-
-| Controller | Knobs |
-|---|---|
-| anonymous memory | `memory.anonymous_rss`, `memory.thp` |
-| memory access | `memory_access.pattern` (sequential, random, stride, working_set, hot_cold, cold_scan), `memory_access.pages_per_second` |
-| file-backed memory | `rss`, `pages_per_second`, `access_pattern`, `madvise` |
-| shared / copy-on-write | `shared_bytes`, `private_bytes`, `actors`, `cow_write_ratio`, memfd or SysV |
-| disk I/O | `read_bps`, `write_bps`, `iops`, `fsync_rate`, `block_size`, `queue_depth`, `pattern`, `direct` |
-| network | `tcp`/`udp`, `target`, `concurrency`, `connections_per_second`, `messages_per_second`, `message_size` |
-| CPU | `utilization`, `workers`, `cpus`, `affinity` |
-
-### Expressions
-
-Every magnitude that says *how much* or *how fast* takes either a plain number or an
-expression over `t`, the age of the run in seconds, so a workload can be a curve rather
-than a step. This covers RSS and page rates, `read_bps`/`write_bps`, `iops`, `fsync_rate`,
-`cpu.utilization`, the network rates and `cow_write_ratio`:
+Every magnitude also accepts an expression in `t` (seconds since the workload started), so a
+workload can be a curve rather than a step:
 
 ```json
 { "memory": { "anonymous_rss": "min(2GiB, t * 64MiB)" } }
-{ "cpu":        { "utilization": "min(400, t * 80)" } }
-{ "network":    { "messages_per_second": "500 + 250*sin(t/286.5)" } }
 ```
 
-`+ - * /`, `min`, `max`, `sin`, `cos`, `exp`, `log` and constants are available. Byte-valued
-fields expand unit suffixes (`"64MiB"`); dimensionless ones reject them. Counts and choices
-(`workers`, `concurrency`, `io.block_size`, the seeds) stay literal. See
-[the expression contract](starlight/src/content/docs/expressions.md).
-
-### Direct I/O
-
-`io.direct: true` opens the region with `O_DIRECT`, so throughput and latency describe the
-block device rather than the page cache. `block_size` then has to be a multiple of 4096, or the
-request is refused.
-
-One caveat worth knowing before you draw a conclusion from it: reading a region that has never
-been written is nearly free, because the filesystem zero-fills the sparse extent without going
-to the device. On this host that reads at `0.46 µs` against `12.90 µs` for a region written
-first. Write to the region before reading it if you are measuring read latency.
-
-### A built-in blackhole
-
-There is no need for a server to point at. `--sink` makes loadlab itself a discarding TCP and
-UDP endpoint:
-
-```bash
-cargo run --release -- --sink 127.0.0.1:9099
-```
-
-## ⚙️ Configuration
-
-Every flag has an environment variable of the same name in `LOADLAB_` upper case.
-
-| Flag | Default | Meaning |
-|---|---|---|
-| `--bind` | `127.0.0.1:8080` | HTTP bind address; keep it on loopback |
-| `--max-memory-bytes` | 8 GiB | ceiling on anonymous memory; a request can lower it, never raise it |
-| `--max-file-backed-bytes` | 1 GiB | ceiling on the file the file-backed controller creates |
-| `--file-backed-dir` | cwd | where those files are created; must be a real filesystem |
-| `--max-shared-bytes` | 2 GiB | ceiling on shared **plus** copy-on-write, combined |
-| `--max-io-bytes` | 1 GiB | ceiling on the I/O region |
-| `--max-network-ops-per-second` | 100000 | ceiling on messages plus fresh connections |
-| `--api-token` | unset | Bearer token required on every endpoint but `/health` |
-| `--max-body-bytes` | 65536 | largest accepted request body |
-| `--mutation-rate-per-second` / `--mutation-burst` | 20 / 40 | mutations accepted before `429` |
-| `--sink` | unset | run as a discarding TCP/UDP endpoint instead |
-
-### Safety
-
-The ceilings are the point of the tool. Memory and disk are clamped and reported as
-`saturated` rather than refused, so a run degrades visibly instead of failing
-mysteriously. The network ceiling is separate for a different reason: it is the one limit that
-protects systems other than the one running loadlab.
-
-The file-backed controller **refuses to start on tmpfs**. Those pages would be accounted as
-shared memory rather than file memory, and the workload would silently not be doing what you
-asked — the one failure mode worse than an error.
-
-## 🔒 Exposing it beyond loopback
-
-Setting `--bind` to a routable address hands anyone who can reach the port the ability to
-allocate memory and generate traffic. If you do it, set a token:
-
-```bash
-LOADLAB_API_TOKEN=s3cret cargo run --release -- --bind 0.0.0.0:8080
-```
-
-loadlab does not terminate TLS; put it behind a reverse proxy if the port leaves the host.
-
-## 🛠️ Development
+## Development
 
 ```bash
 make check     # cargo check
@@ -198,27 +61,15 @@ make docs      # build the Starlight site into starlight/dist
 make run       # cargo run --release
 ```
 
-`make lint` runs clippy with `-D warnings` and **does not currently pass** — the tree carries
-~194 pedantic warnings. Run `cargo clippy --all-targets` to see them.
+`make lint` runs clippy with `-D warnings` and does not currently pass; run
+`cargo clippy --all-targets` to see what remains.
 
 `examples/basic.sh` is a short end-to-end tour of the API. `scripts/smoke.sh` is what CI-style
 checks run.
 
-## 📚 Documentation
+The documentation lives in [`starlight/`](starlight/) and is deployed to GitHub Pages by
+`.github/workflows/docs.yml`.
 
-The documentation is an [Astro Starlight](https://starlight.astro.build/) site under
-[`starlight/`](starlight/). Its content lives in `starlight/src/content/docs/`, `make docs` builds
-it into the (gitignored) `starlight/dist/`, and `.github/workflows/docs.yml` publishes it to GitHub
-Pages.
+## License
 
-| Chapter | Contents |
-|---|---|
-| [Introduction](starlight/src/content/docs/introduction.md) | what loadlab is and the model it is built around |
-| [Quick start](starlight/src/content/docs/getting-started.md) | build it, drive it with `curl`, read it back |
-| [Core concepts](starlight/src/content/docs/concepts.md) | controllers and expressions at a glance |
-| [Going further](starlight/src/content/docs/examples.md) | workloads that ramp, breathe and layer |
-| [Expressions](starlight/src/content/docs/expressions.md) | the full expression language: `t`, units, grammar, clamping |
-| [Controllers](starlight/src/content/docs/controllers/overview.md) | the catalog, then one page per controller |
-| [HTTP API](starlight/src/content/docs/http-api/authentication.md) | every endpoint, field and error code |
-| [Architecture](starlight/src/content/docs/architecture.md) · [Deploying](starlight/src/content/docs/deploy.md) | internals and systemd |
-| [`contrib/`](contrib/) | Grafana dashboard, alert rules, Prometheus and Compose examples |
+MIT.
