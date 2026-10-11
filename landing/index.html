@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>loadlab — documentation</title>
+    <meta name="description" content="A programmable Linux workload laboratory" />
+    <style>
+      :root {
+        color-scheme: light dark;
+        --bg: #ffffff;
+        --fg: #16181d;
+        --muted: #5b6270;
+        --card: #f5f6f8;
+        --border: #e2e4e9;
+        --accent: #3f6bff;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #0e1117;
+          --fg: #e8eaed;
+          --muted: #9aa2b1;
+          --card: #171b22;
+          --border: #262b34;
+          --accent: #7a9bff;
+        }
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+        background: var(--bg);
+        color: var(--fg);
+        font: 16px/1.6 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      }
+      main { width: min(70ch, 92vw); padding: 3rem 0; }
+      h1 { font-size: clamp(2rem, 6vw, 3rem); margin: 0 0 .25rem; letter-spacing: -.02em; }
+      .tagline { color: var(--muted); margin: 0 0 2.5rem; font-size: 1.1rem; }
+      .cards { display: grid; gap: 1rem; grid-template-columns: 1fr 1fr; }
+      @media (max-width: 40rem) { .cards { grid-template-columns: 1fr; } }
+      a.card {
+        display: block;
+        padding: 1.5rem;
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        background: var(--card);
+        color: inherit;
+        text-decoration: none;
+        transition: border-color .15s, transform .15s;
+      }
+      a.card:hover { border-color: var(--accent); transform: translateY(-2px); }
+      a.card h2 { margin: 0 0 .35rem; font-size: 1.15rem; }
+      a.card p { margin: 0; color: var(--muted); font-size: .95rem; }
+      a.card .go { color: var(--accent); font-weight: 600; font-size: .9rem; margin-top: .75rem; display: inline-block; }
+      footer { color: var(--muted); font-size: .85rem; margin-top: 2.5rem; }
+      code { background: var(--card); border: 1px solid var(--border); border-radius: 5px; padding: .1em .35em; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>loadlab</h1>
+      <p class="tagline">A programmable Linux workload laboratory. Same content, two documentation engines.</p>
+      <div class="cards">
+        <a class="card" href="./starlight/">
+          <h2>Starlight</h2>
+          <p>Astro Starlight: sidebar navigation, built-in search and a modern reading experience.</p>
+          <span class="go">Open /starlight/ →</span>
+        </a>
+        <a class="card" href="./book/">
+          <h2>mdBook</h2>
+          <p>The original book, built with mdBook.</p>
+          <span class="go">Open /book/ →</span>
+        </a>
+      </div>
+      <footer>
+        Source of truth for the text lives in <code>docs/src/</code>; the Starlight copy is under
+        <code>starlight/</code>.
+      </footer>
+    </main>
+  </body>
+</html>

@@ -212,12 +212,13 @@ loadlab does not terminate TLS; put it behind a reverse proxy if the port leaves
 ## 🛠️ Development
 
 ```bash
-make check     # cargo check
-make test      # 229 unit + 102 integration tests
-make fmt       # cargo fmt
-make smoke     # scripts/smoke.sh against a running instance
-make docs      # build the mdBook into docs/book
-make run       # cargo run --release
+make check            # cargo check
+make test             # 229 unit + 102 integration tests
+make fmt              # cargo fmt
+make smoke            # scripts/smoke.sh against a running instance
+make docs             # build the mdBook into docs/book
+make docs-starlight   # build the Starlight site into starlight/dist
+make run              # cargo run --release
 ```
 
 `make lint` runs clippy with `-D warnings` and **does not currently pass** — the tree carries
@@ -228,9 +229,17 @@ checks run.
 
 ## 📚 Documentation
 
-The documentation is an [mdBook](https://rust-lang.github.io/mdBook/) under [`docs/`](docs/):
-[`docs/src/`](docs/src/) is the source, `make docs` builds it into the (gitignored) `docs/book/`,
-and `.github/workflows/docs.yml` publishes it as a static site (GitHub Pages).
+The same text is published through two documentation engines, both built and deployed by
+`.github/workflows/docs.yml` as a single GitHub Pages site: a landing page at the root, the mdBook
+under `/book/`, and the Starlight site under `/starlight/`.
+
+- The [mdBook](https://rust-lang.github.io/mdBook/) source is [`docs/src/`](docs/src/); `make docs`
+  builds it into the (gitignored) `docs/book/`. `docs/book.toml` configures it.
+- The [Starlight](https://starlight.astro.build/) site is an independent Astro project under
+  [`starlight/`](starlight/); `make docs-starlight` builds it into the (gitignored)
+  `starlight/dist/`. Its content lives in `starlight/src/content/docs/` and is maintained separately
+  from the mdBook.
+- The landing page is [`landing/index.html`](landing/index.html).
 
 | Chapter | Contents |
 |---|---|

@@ -1,0 +1,34 @@
+---
+title: loadlab
+description: A programmable Linux workload laboratory
+template: splash
+hero:
+  tagline: Express a resource workload as state, converge to it, and read back what the kernel actually measured.
+  actions:
+    - text: Introduction
+      link: ./introduction/
+      icon: right-arrow
+    - text: Quick start
+      link: ./getting-started/
+      icon: rocket
+---
+
+import { Card, CardGrid } from '@astrojs/starlight/components';
+
+<CardGrid stagger>
+  <Card title="Number or expression" icon="pencil">
+    Every continuous magnitude accepts a plain number or a time-dependent expression in `t`, with one
+    rule to learn rather than one per controller.
+  </Card>
+  <Card title="Closed-loop control" icon="setting">
+    Setpoints are tracked continuously while the workload runs, and the gap between target and
+    measured reality is reported, not hidden.
+  </Card>
+  <Card title="What the kernel measured" icon="magnifier">
+    Anonymous, file-backed and shared memory, CPU, disk I/O and network, observed through `/proc`
+    rather than assumed.
+  </Card>
+  <Card title="HTTP and Prometheus" icon="laptop">
+    Drive it from a JSON API and scrape its state as Prometheus text while a workload runs.
+  </Card>
+</CardGrid>

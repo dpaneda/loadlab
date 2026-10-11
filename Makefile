@@ -1,4 +1,4 @@
-.PHONY: check test fmt lint run smoke docs
+.PHONY: check test fmt lint run smoke docs docs-starlight
 
 check:
 	cargo check
@@ -20,3 +20,6 @@ smoke:
 
 docs:
 	mdbook build docs
+
+docs-starlight:
+	cd starlight && npm ci && npm run build
