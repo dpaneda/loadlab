@@ -2,6 +2,18 @@
 title: "Network"
 ---
 
+> **In short.** `network.messages_per_second` and `network.connections_per_second` generate raw
+> TCP or UDP traffic against one target `host:port` — kernel-stack load, not HTTP requests. A
+> target of `""` (the default) generates nothing; pair it with `--sink` to run fully locally.
+> Minimal form:
+>
+> ```json
+> {"network":{"transport":"tcp","target":"127.0.0.1:9099","messages_per_second":5000,"message_size":1024}}
+> ```
+>
+> What to watch in `GET /metrics` under `controller.network`: each requested rate next to its
+> `*_actual` counterpart, `bytes_per_second_actual`, `saturated`, `converged`.
+
 `network.messages_per_second` and `network.connections_per_second` generate raw TCP or UDP traffic
 against a remote target `host:port`. This is deliberately not an HTTP client: the useful question
 for a Linux workload laboratory is what the *kernel network stack* does under raw load, leaving
@@ -22,13 +34,13 @@ without an external server and integration tests can execute anywhere.
 | `network.messages_per_second` | `0.0` | finite non-negative number, or an expression in `t` | messages to send per second over persistent connections or UDP |
 | `network.message_size` | `1024` | `1..=1048576` bytes | payload size in bytes for each message write and fresh connection |
 
-### Rates follow the experiment clock
+### Rates follow the run clock
 
-Both rates accept either a constant number or an expression in `t`, the experiment clock, following
-the same [continuous-magnitude contract](../../expressions/#continuous-magnitudes-a-number-or-an-expression) as every
+Both rates accept either a constant number or an expression in `t`, the run clock, following
+the same [continuous-magnitude contract](../../expressions/#what-t-is-the-run-clock) as every
 other rate. The expression is dimensionless -- an operation rate is not a byte count, so `1MiB` is
 refused rather than silently read as a million operations per second -- and it is evaluated once per
-tick, so the target moves rather than being set at `t = 0`. A network piece of a scenario can
+tick, so the target moves rather than being set at `t = 0`. A network piece of a workload can
 therefore breathe with the rest of it:
 
 ```json

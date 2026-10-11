@@ -34,11 +34,6 @@ const DEFAULT_IO_CEILING_BYTES: u64 = 512 * 1024 * 1024;
 /// The network I/O ceiling most tests run with. 100_000 is the process default; this is high enough
 /// that a controller rate of a few thousand operations per second never hits it.
 const DEFAULT_NETWORK_CEILING_OPS: u64 = 100_000;
-/// A fixed instant well before any test process could have started, and its Unix seconds.
-const PAST_START_TIME: &str = "2024-01-01T00:00:00Z";
-const PAST_START_TIME_UNIX: i64 = 1_704_067_200;
-/// A fixed instant after any test process will plausibly still be running.
-const FUTURE_START_TIME: &str = "2100-01-01T00:00:00Z";
 /// The page size every test machine runs with. The `pages`/`rss_bytes` relationship the tests
 /// assert is an identity the controller establishes, so it holds for whatever the page size is.
 const PAGE_BYTES: u64 = 4096;
@@ -914,7 +909,7 @@ fn prometheus_exports_the_cpu_controller() {
 }
 
 #[test]
-fn metrics_publish_the_experiment_identity_and_the_host_it_ran_on() {
+fn metrics_publish_the_host_it_ran_on() {
     let server = Server::start();
 
     let (_, metrics) = server.get("/metrics");
@@ -951,251 +946,17 @@ fn metrics_publish_the_experiment_identity_and_the_host_it_ran_on() {
         );
     }
 
-    // Experiment identity. Unconfigured by default, so nothing claims reproducibility it does not
-    // have.
-    assert!(experiment(&metrics)["seed"].is_null());
-    assert!(experiment(&metrics)["start_time"].is_null());
-    assert!(experiment(&metrics)["start_offset_seconds"].is_null());
-    assert!(experiment(&metrics)["active_scenario"].is_null());
-    assert!(experiment_elapsed(&metrics) >= 0.0);
-}
-
-#[test]
-fn a_seed_can_be_installed_and_read_back_and_is_published_as_a_metric() {
-    let server = Server::start();
-
-    let (status, _) = server.patch("/workload", r#"{"experiment":{"seed":987654321}}"#);
-    assert_eq!(status, 200);
-
-    // In the desired state, so it is visible before anything runs.
-    let (_, state) = server.get("/state");
-    assert_eq!(state["experiment"]["seed"], 987_654_321);
-
-    let (_, metrics) = server.get("/metrics");
-    assert_eq!(experiment(&metrics)["seed"], 987_654_321);
-    let (_, _, text) = server.get_text("/prometheus");
-    assert_eq!(metric_u64(&text, "loadlab_experiment_seed"), 987_654_321);
-}
-
-#[test]
-fn a_start_time_that_is_not_a_timestamp_is_refused_with_a_reason() {
-    let server = Server::start();
-
-    let (status, error) = server.patch("/workload", r#"{"experiment":{"start_time":"yesterday"}}"#);
-    assert_eq!(status, 400);
-    // The message has to name the field, or a client cannot tell which of its two values was wrong.
-    let message = error["error"].as_str().expect("an error message");
+    // The workload and controller blocks are present regardless of what the host was asked to do:
+    // the shape of a scrape is fixed even before anything runs.
     assert!(
-        message.contains("experiment.start_time"),
-        "the error should name the field: {message}"
-    );
-
-    // And the refusal left the state untouched rather than half-applying it.
-    let (_, state) = server.get("/state");
-    assert!(state["experiment"]["start_time"].is_null());
-}
-
-#[test]
-fn t_is_the_age_of_the_run_and_restarts_when_the_workload_does() {
-    let server = Server::start();
-    let (status, _) = server.put(
-        "/workload",
-        r#"{"running":true,"cpu":{"utilization":"20","workers":1}}"#,
-    );
-    assert_eq!(status, 200);
-
-    // Let the first run reach a `t` well clear of zero, so that a restart is unambiguously a
-    // different number rather than a race between two nearly equal readings.
-    let first_t = experiment_elapsed(
-        &server.wait_metrics("the first run to reach a t of about a second", |metrics| {
-            experiment_elapsed(metrics) > 1.0
-        }),
-    );
-    assert!(
-        experiment_elapsed(&server.get("/metrics").1) >= first_t,
-        "t must not go backwards while a run continues"
-    );
-
-    // Stop and start again: a restart is a new run, and the point of a run-relative t is that the new
-    // run starts from zero rather than continuing a number that now describes nothing.
-    server.post("/workload/stop");
-    sleep(Duration::from_millis(150));
-    server.post("/workload/start");
-
-    let restarted = server.wait_metrics("t to be measured from the new run", |metrics| {
-        experiment_elapsed(metrics) > 0.05 && experiment_elapsed(metrics) < 0.5
-    });
-    assert!(
-        experiment_elapsed(&restarted) < 0.5,
-        "t should have restarted from the new run, got {}",
-        experiment_elapsed(&restarted)
+        metrics["controller"]["tick_count"].as_u64().is_some(),
+        "controller block must be present in /metrics"
     );
 }
 
 #[test]
-fn a_configured_start_time_places_t_against_a_shared_timeline() {
+fn prometheus_exports_the_host_series() {
     let server = Server::start();
-    // A fixed instant in the past, well before this process could have started. Writing it as a
-    // constant rather than "ninety seconds ago" keeps the expected `t` exact arithmetic instead of
-    // a range, and keeps the test from needing a date formatter in a crate that cannot import one.
-    let (status, _) = server.patch(
-        "/workload",
-        &format!(r#"{{"experiment":{{"start_time":"{PAST_START_TIME}"}}}}"#),
-    );
-    assert_eq!(status, 200);
-
-    // The desired state has the timestamp; the observation needs a tick to pick it up.
-    let (_, state) = server.get("/state");
-    assert_eq!(state["experiment"]["start_time"], PAST_START_TIME);
-    let metrics = wait_for_start_offset(&server);
-
-    let t = experiment_elapsed(&metrics);
-    let expected = unix_seconds() - PAST_START_TIME_UNIX;
-    assert!(
-        (expected as f64 - 5.0..=expected as f64 + 5.0).contains(&t),
-        "t should be the time since {PAST_START_TIME}, about {expected}, got {t}"
-    );
-    // The offset is what makes that number legible: it is how far the run was anchored from the
-    // instant it was told to use, and here it is large, because the configured instant is old.
-    let offset = experiment(&metrics)["start_offset_seconds"]
-        .as_f64()
-        .expect("an offset with a configured start time");
-    assert!(offset > 3_000.0, "expected a large offset, got {offset}");
-
-    // The workload's own age is a different number and is published separately, so a slow-aging
-    // process is no longer mistaken for a slow run. This is the whole difference between the two
-    // series: process uptime here is under a minute.
-    let (_, _, text) = server.get_text("/prometheus");
-    let uptime = metric_f64(&text, "loadlab_process_uptime_seconds");
-    let elapsed = metric_f64(&text, "loadlab_experiment_elapsed_seconds");
-    assert!(
-        elapsed > uptime,
-        "t is anchored to the configured instant, so it leads process uptime: {elapsed} vs {uptime}"
-    );
-}
-
-#[test]
-fn a_start_time_in_the_future_is_accepted_and_makes_t_negative() {
-    let server = Server::start();
-    let (status, _) = server.patch(
-        "/workload",
-        &format!(r#"{{"experiment":{{"start_time":"{FUTURE_START_TIME}"}}}}"#),
-    );
-    assert_eq!(status, 200);
-
-    let metrics = wait_for_start_offset(&server);
-    // Refusing this would be the easier choice, and the wrong one: a scenario shared across hosts
-    // has to be installable before its scheduled start, and clamping to zero would throw away the
-    // distance to the start instead of reporting it. Negative `t` is the honest answer.
-    assert!(
-        experiment_elapsed(&metrics) < 0.0,
-        "a future start time should make t negative, got {}",
-        experiment_elapsed(&metrics)
-    );
-
-    // The workload still runs: `t` is used by expressions, not as a gate. Patched rather than
-    // replaced, because `PUT /workload` is a whole new desired state and would drop the start time
-    // along with everything else.
-    let (status, _) = server.patch(
-        "/workload",
-        r#"{"running":true,"cpu":{"utilization":"10","workers":1}}"#,
-    );
-    assert_eq!(status, 200);
-    let metrics = server.wait_metrics("the workload to be reconciled", |metrics| {
-        cpu_number(metrics, "requested_utilization_pct") > 0.0
-    });
-    assert!(experiment_elapsed(&metrics) < 0.0);
-}
-
-#[test]
-fn a_start_time_in_the_past_keeps_t_climbing_across_a_stopped_workload() {
-    let server = Server::start();
-    server.patch(
-        "/workload",
-        &format!(r#"{{"experiment":{{"start_time":"{PAST_START_TIME}"}}}}"#),
-    );
-    // Patched, not replaced: `PUT /workload` would install a whole new desired state and take the
-    // start time with it.
-    let (status, _) = server.patch(
-        "/workload",
-        r#"{"running":true,"cpu":{"utilization":"10","workers":1}}"#,
-    );
-    assert_eq!(status, 200);
-
-    wait_for_start_offset(&server);
-    let before = experiment_elapsed(&server.get("/metrics").1);
-    server.patch("/workload", r#"{"running":false}"#);
-    sleep(Duration::from_millis(200));
-    let after = experiment_elapsed(&server.get("/metrics").1);
-
-    // `t` is wall time against a fixed instant, so it does not stop when the workload does. A
-    // scenario with a gap in it needs `t` to keep moving across the gap; freezing it would make the
-    // workload after the gap a different experiment from the one before it.
-    assert!(
-        after > before,
-        "t should keep advancing while stopped: {before} then {after}"
-    );
-}
-
-#[test]
-fn an_active_scenario_is_published_with_the_version_that_identifies_its_content() {
-    let server = Server::start();
-    let scenario = r#"{"name":"ramp","version":"2024-05-01","workload":{"cpu":{"utilization":"10","workers":1}}}"#;
-    let (status, _) = server.post_json("/scenarios/load", scenario);
-    assert_eq!(status, 200);
-    let (status, _) = server.post_json("/scenarios/run", r#"{"name":"ramp"}"#);
-    assert_eq!(status, 200);
-
-    let (_, metrics) = server.get("/metrics");
-    // A version is the point. A scenario whose name is published but whose content is not cannot be
-    // told apart from a later edit to the same name, which is what a version is for.
-    assert_eq!(experiment(&metrics)["active_scenario"]["name"], "ramp");
-    assert_eq!(
-        experiment(&metrics)["active_scenario"]["version"],
-        "2024-05-01"
-    );
-
-    // And it survives being read after the workload has been running, rather than only being set at
-    // activation time.
-    sleep(Duration::from_millis(150));
-    let (_, later) = server.get("/metrics");
-    assert_eq!(
-        experiment(&later)["active_scenario"]["version"],
-        "2024-05-01"
-    );
-}
-
-#[test]
-fn replacing_the_workload_directly_clears_the_active_scenario_rather_than_leaving_it_stale() {
-    let server = Server::start();
-    server.post_json(
-        "/scenarios/load",
-        r#"{"name":"ramp","version":"1","workload":{"cpu":{"utilization":"10","workers":1}}}"#,
-    );
-    server.post_json("/scenarios/run", r#"{"name":"ramp"}"#);
-    let (_, metrics) = server.get("/metrics");
-    assert_eq!(
-        experiment(&metrics)["active_scenario"]["name"],
-        "ramp",
-        "the scenario should be active to begin with"
-    );
-
-    // The workload is now whatever the client just wrote, which the scenario no longer describes.
-    server.put("/workload", r#"{"cpu":{"utilization":"10","workers":1}}"#);
-
-    // Publishing "ramp" here would file a measurement of an unrelated workload under a name that
-    // means something else.
-    let (_, metrics) = server.get("/metrics");
-    assert!(
-        experiment(&metrics)["active_scenario"].is_null(),
-        "a directly installed workload is a different kind of run, not an older scenario"
-    );
-}
-
-#[test]
-fn prometheus_exports_the_experiment_and_host_series() {
-    let server = Server::start();
-    server.patch("/workload", r#"{"experiment":{"seed":7}}"#);
     // The exposition is rendered by the controller loop, not by the request, so a scrape can
     // legitimately arrive before the first tick has read the new state.
     server.wait_metrics("the controller to tick", |metrics| {
@@ -1204,28 +965,6 @@ fn prometheus_exports_the_experiment_and_host_series() {
     let (_, content_type, text) = server.get_text("/prometheus");
 
     assert_eq!(content_type, "text/plain; version=0.0.4; charset=utf-8");
-
-    // Both new gauges, with the types that match their use: both are point-in-time values, and a
-    // counter would make a seed change or a restarted run look like a spike.
-    let types: Vec<(String, String)> = exposed_types(&text)
-        .into_iter()
-        .filter(|(name, _)| {
-            name == "loadlab_experiment_seed"
-                || name == "loadlab_experiment_elapsed_seconds"
-                || name == "loadlab_host_info"
-        })
-        .collect();
-    assert_eq!(
-        types,
-        vec![
-            (
-                "loadlab_experiment_elapsed_seconds".to_owned(),
-                "gauge".to_owned()
-            ),
-            ("loadlab_experiment_seed".to_owned(), "gauge".to_owned()),
-            ("loadlab_host_info".to_owned(), "gauge".to_owned()),
-        ],
-    );
 
     // Host identity is labels on one series, not one series per host: the labels are bounded by the
     // machine, so unlike client-supplied values they cannot grow.
@@ -1239,8 +978,6 @@ fn prometheus_exports_the_experiment_and_host_series() {
     assert!(host.contains("cpus="), "no cpu count label: {host}");
     assert!(host.contains("kernel_release="), "no kernel label: {host}");
     assert!(host.ends_with(" 1"), "host info must always be 1: {host}");
-
-    assert_eq!(metric_u64(&text, "loadlab_experiment_seed"), 7);
 }
 
 #[test]
@@ -2912,31 +2649,29 @@ fn network_sink_saturates() {
     );
 }
 
-/// The composite scenario shape, accepted over HTTP.
+/// The composite workload body, accepted over HTTP.
 ///
 /// This is the documented body. It is written out whole and verbatim here
 /// for the same reason it is in the unit tests: the point is that a user can paste it and have it
 /// work, not that some rearrangement of it would.
-const COMPOSITE_SCENARIO_BODY: &str = r#"{
+const COMPOSITE_BODY: &str = r#"{
     "controller": { "max_memory_bytes": 536870912 },
-    "anonymous": { "rss": "500MiB + 200MiB*sin(t/30)" },
-    "file_backed": { "rss": "200MiB", "pages_per_second": 5000 },
+    "memory": { "anonymous_rss": "500MiB + 200MiB*sin(t/30)" },
+    "file_backed": { "rss": "200MiB" },
     "cpu": { "utilization": "100 + 50*sin(t/10)", "workers": 4 },
-    "faults": { "minor_rate": 10000 }
+    "memory_access": { "pages_per_second": 10000 }
 }"#;
 
 #[test]
-fn the_composite_scenario_body_is_accepted_and_reaches_its_controllers() {
+fn the_composite_body_is_accepted_and_reaches_its_controllers() {
     let server = Server::start();
-    let (status, body) = server.put("/workload", COMPOSITE_SCENARIO_BODY);
+    let (status, body) = server.put("/workload", COMPOSITE_BODY);
     assert_eq!(status, 200, "body was {body}");
 
-    // The aliases are folded into the fields the controllers read.
+    // The whole composite reaches the controllers it names.
     assert_eq!(body["memory"]["anonymous_rss"], "500MiB + 200MiB*sin(t/30)");
     assert_eq!(body["memory_access"]["pages_per_second"], 10000.0);
-    // And the fields that were already top level are untouched.
     assert_eq!(body["file_backed"]["rss"], "200MiB");
-    assert_eq!(body["file_backed"]["pages_per_second"], 5000.0);
     assert_eq!(body["cpu"]["utilization"], "100 + 50*sin(t/10)");
     assert_eq!(body["cpu"]["workers"], 4);
 
@@ -2949,389 +2684,7 @@ fn the_composite_scenario_body_is_accepted_and_reaches_its_controllers() {
         "500MiB + 200MiB*sin(t/30)"
     );
     assert_eq!(state["memory_access"]["pages_per_second"], 10000.0);
-    assert!(
-        state.get("anonymous").is_none(),
-        "the input alias must not be echoed back: {state}"
-    );
-    assert!(
-        state.get("faults").is_none(),
-        "the input alias must not be echoed back: {state}"
-    );
-}
-
-#[test]
-fn a_default_state_has_no_alias_keys_at_all() {
-    let server = Server::start();
-    let (status, state) = server.get("/state");
-    assert_eq!(status, 200);
-    assert!(state.get("anonymous").is_none(), "{state}");
-    assert!(state.get("faults").is_none(), "{state}");
-}
-
-#[test]
-fn patching_an_alias_over_the_canonical_field_replaces_it() {
-    let server = Server::start();
-    assert_eq!(
-        server
-            .put(
-                "/workload",
-                r#"{"running":true,"memory":{"anonymous_rss":"64MiB"}}"#
-            )
-            .0,
-        200
-    );
-
-    // A patch that carries the alias while the canonical field is already set is the case where
-    // "last writer wins" and "the alias is authoritative" could disagree. The alias wins, so a
-    // client can move between the two spellings without having to clear the other one first.
-    let (status, body) = server.patch("/workload", r#"{"anonymous":{"rss":"256MiB"}}"#);
-    assert_eq!(status, 200);
-    assert_eq!(body["memory"]["anonymous_rss"], "256MiB");
-    assert_eq!(server.get("/state").1["memory"]["anonymous_rss"], "256MiB");
-}
-
-#[test]
-fn a_major_fault_rate_is_a_400_and_leaves_the_state_alone() {
-    let server = Server::start();
-    assert_eq!(
-        server
-            .put(
-                "/workload",
-                r#"{"running":true,"memory":{"anonymous_rss":"64MiB"}}"#
-            )
-            .0,
-        200
-    );
-
-    let (status, body) = server.put("/workload", r#"{"faults":{"major_rate":5000}}"#);
-    assert_eq!(status, 400, "body was {body}");
-    let message = body["error"].as_str().expect("an error string");
-    assert!(message.contains("major_rate"), "{message}");
-    // The message has to say what is accepted, or the caller is left guessing which key to use.
-    assert!(message.contains("minor_rate"), "{message}");
-
-    // A rejected request must not have half-applied.
-    assert_eq!(server.get("/state").1["memory"]["anonymous_rss"], "64MiB");
-    assert_eq!(server.get("/state").1["running"], true);
-}
-
-#[test]
-fn a_misspelled_alias_field_is_a_400() {
-    let server = Server::start();
-    let (status, body) = server.put("/workload", r#"{"anonymous":{"rsz":"1MiB"}}"#);
-    assert_eq!(status, 400, "body was {body}");
-    assert!(
-        body["error"].as_str().unwrap_or_default().contains("rsz"),
-        "{body}"
-    );
-}
-
-#[test]
-fn a_scenario_is_stored_and_not_run_until_it_is_asked_for() {
-    let server = Server::start();
-    let (status, body) = server.post_json(
-        "/scenarios/load",
-        r#"{"name":"steady","version":"1","workload":{"controller":{"tick_ms":250},
-            "memory":{"anonymous_rss":"64MiB"},"cpu":{"utilization":"50"}}}"#,
-    );
-    assert_eq!(status, 200, "body was {body}");
-    assert_eq!(body["name"], "steady");
-    assert_eq!(body["version"], "1");
-    assert_eq!(body["workload"]["controller"]["tick_ms"], 250);
-    // Stored scenarios describe what to generate; `running` belongs to the decision to run one,
-    // so a definition never carries it.
-    assert_eq!(body["workload"]["running"], false);
-
-    // Loading is not running. A client that stores a library of scenarios must not start generating
-    // load as a side effect of defining one.
-    let (status, state) = server.get("/state");
-    assert_eq!(status, 200);
-    assert_eq!(state["running"], false);
-    assert_eq!(state["controller"]["tick_ms"], 100);
-}
-
-#[test]
-fn loading_normalizes_and_validates_so_a_stored_scenario_is_always_usable() {
-    let server = Server::start();
-    let (status, body) = server.post_json(
-        "/scenarios/load",
-        r#"{"name":"aliased","version":"1","workload":{"anonymous":{"rss":"128MiB"},
-            "faults":{"minor_rate":2000}}}"#,
-    );
-    assert_eq!(status, 200, "body was {body}");
-    assert_eq!(body["workload"]["memory"]["anonymous_rss"], "128MiB");
-    assert_eq!(
-        body["workload"]["memory_access"]["pages_per_second"],
-        2000.0
-    );
-
-    // An invalid workload is refused at definition time, not at run time. The point of validating
-    // here is that `run` can never fail for a scenario that was accepted.
-    let (status, body) = server.post_json(
-        "/scenarios/load",
-        r#"{"name":"broken","version":"1","workload":{"controller":{"tick_ms":0}}}"#,
-    );
-    assert_eq!(status, 400, "body was {body}");
-    assert_eq!(
-        server.get("/scenarios").1["scenarios"]
-            .as_array()
-            .map(Vec::len),
-        Some(1)
-    );
-}
-
-#[test]
-fn running_a_scenario_applies_it_and_reports_itself_as_active() {
-    let server = Server::start();
-    assert_eq!(
-        server
-            .post_json(
-                "/scenarios/load",
-                r#"{"name":"ramp","version":"1","workload":{"memory":{"anonymous_rss":"64MiB"},
-                    "cpu":{"utilization":"100 + 50*sin(t/10)"}}}"#,
-            )
-            .0,
-        200
-    );
-
-    let (status, listing) = server.get("/scenarios");
-    assert_eq!(status, 200);
-    assert_eq!(listing["active"], Value::Null);
-    assert_eq!(listing["scenarios"][0]["name"], "ramp");
-    assert_eq!(listing["scenarios"][0]["version"], "1");
-
-    let (status, body) = server.post_json("/scenarios/run", r#"{"name":"ramp"}"#);
-    assert_eq!(status, 200, "body was {body}");
-    assert_eq!(body["running"], true);
-    assert_eq!(body["memory"]["anonymous_rss"], "64MiB");
-    assert_eq!(body["cpu"]["utilization"], "100 + 50*sin(t/10)");
-
-    // The workload really is the scenario's now.
-    assert_eq!(server.get("/state").1["running"], true);
-    assert_eq!(
-        server.get("/state").1["cpu"]["utilization"],
-        "100 + 50*sin(t/10)"
-    );
-    assert_eq!(server.get("/scenarios").1["active"], "ramp");
-}
-
-#[test]
-fn stopping_a_scenario_stops_the_workload_and_clears_the_active_marker() {
-    let server = Server::start();
-    assert_eq!(
-        server
-            .post_json(
-                "/scenarios/load",
-                r#"{"name":"ramp","version":"1","workload":{"memory":{"anonymous_rss":"64MiB"}}}"#,
-            )
-            .0,
-        200
-    );
-    assert_eq!(
-        server.post_json("/scenarios/run", r#"{"name":"ramp"}"#).0,
-        200
-    );
-
-    let (status, body) = server.post("/scenarios/stop");
-    assert_eq!(status, 200);
-    assert_eq!(body["running"], false);
-    // The desired state survives the stop, so restarting does not need the scenario again.
-    assert_eq!(body["memory"]["anonymous_rss"], "64MiB");
-    assert_eq!(server.get("/state").1["running"], false);
-    assert_eq!(server.get("/scenarios").1["active"], Value::Null);
-}
-
-#[test]
-fn writing_the_workload_directly_clears_the_active_scenario() {
-    let server = Server::start();
-    assert_eq!(
-        server
-            .post_json(
-                "/scenarios/load",
-                r#"{"name":"ramp","version":"1","workload":{"controller":{"tick_ms":250}}}"#,
-            )
-            .0,
-        200
-    );
-    assert_eq!(
-        server.post_json("/scenarios/run", r#"{"name":"ramp"}"#).0,
-        200
-    );
-    assert_eq!(server.get("/scenarios").1["active"], "ramp");
-
-    // A direct write supplants the scenario. Reporting it as still active would be claiming the
-    // workload is being driven by something it is not.
-    assert_eq!(server.put("/workload", r#"{"running":true}"#).0, 200);
-    assert_eq!(server.get("/scenarios").1["active"], Value::Null);
-
-    assert_eq!(
-        server.post_json("/scenarios/run", r#"{"name":"ramp"}"#).0,
-        200
-    );
-    assert_eq!(
-        server
-            .patch("/workload", r#"{"controller":{"tick_ms":300}}"#)
-            .0,
-        200
-    );
-    assert_eq!(server.get("/scenarios").1["active"], Value::Null);
-
-    // `POST /workload/stop` is the same kind of event.
-    assert_eq!(
-        server.post_json("/scenarios/run", r#"{"name":"ramp"}"#).0,
-        200
-    );
-    assert_eq!(server.post("/workload/stop").0, 200);
-    assert_eq!(server.get("/scenarios").1["active"], Value::Null);
-}
-
-#[test]
-fn a_version_identifies_a_document_and_is_not_silently_overwritten() {
-    let server = Server::start();
-    let load = |server: &Server, version: &str, rss: &str| {
-        server.post_json(
-            "/scenarios/load",
-            &format!(
-                r#"{{"name":"ramp","version":"{version}","workload":{{"memory":{{"anonymous_rss":"{rss}"}}}}}}"#
-            ),
-        )
-    };
-
-    // Same name, same version, same content: idempotent.
-    assert_eq!(load(&server, "1", "64MiB").0, 200);
-    assert_eq!(load(&server, "1", "64MiB").0, 200);
-    assert_eq!(
-        server.get("/scenarios").1["scenarios"]
-            .as_array()
-            .map(Vec::len),
-        Some(1)
-    );
-
-    // Same name and version, different content: refused. A version that does not pin its document
-    // is not a version, and quietly overwriting would make a stored scenario unreproducible.
-    let (status, body) = load(&server, "1", "512MiB");
-    assert_eq!(status, 400, "body was {body}");
-    assert!(
-        body["error"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("version"),
-        "{body}"
-    );
-
-    // Bumping the version is how a scenario is changed.
-    assert_eq!(load(&server, "2", "512MiB").0, 200);
-    assert_eq!(server.get("/scenarios").1["scenarios"][0]["version"], "2");
-    assert_eq!(
-        server.get("/state").1["memory"]["anonymous_rss"],
-        Value::Null
-    );
-}
-
-#[test]
-fn the_two_spellings_of_a_composite_scenario_are_the_same_scenario() {
-    let server = Server::start();
-    // Defined canonically...
-    let (status, first) = server.post_json(
-        "/scenarios/load",
-        r#"{"name":"same","version":"1","workload":{"memory":{"anonymous_rss":"128MiB"},
-            "memory_access":{"pages_per_second":2000}}}"#,
-    );
-    assert_eq!(status, 200, "body was {first}");
-    // ...and with the aliases, which normalize to the very same state.
-    let (status, body) = server.post_json(
-        "/scenarios/load",
-        r#"{"name":"same","version":"1","workload":{"anonymous":{"rss":"128MiB"},
-            "faults":{"minor_rate":2000}}}"#,
-    );
-    assert_eq!(status, 200, "body was {body}");
-    assert_eq!(
-        server.get("/scenarios").1["scenarios"]
-            .as_array()
-            .map(Vec::len),
-        Some(1)
-    );
-}
-
-#[test]
-fn running_a_scenario_that_was_never_loaded_is_a_400() {
-    let server = Server::start();
-    let (status, body) = server.post_json("/scenarios/run", r#"{"name":"nope"}"#);
-    assert_eq!(status, 400, "body was {body}");
-    assert!(
-        body["error"].as_str().unwrap_or_default().contains("nope"),
-        "{body}"
-    );
-    assert_eq!(server.get("/state").1["running"], false);
-}
-
-#[test]
-fn a_scenario_identifier_is_validated_rather_than_stored_verbatim() {
-    let server = Server::start();
-    for (description, name) in [
-        ("empty", ""),
-        ("whitespace only", "   "),
-        ("over-long", &"x".repeat(200)),
-        ("carrying a control character", "bad\nname"),
-    ] {
-        let (status, body) = server.post_json(
-            "/scenarios/load",
-            &format!(r#"{{"name":"{name}","version":"1","workload":{{}}}}"#),
-        );
-        assert_eq!(status, 400, "{description} was accepted: {body}");
-    }
-    assert_eq!(
-        server.get("/scenarios").1["scenarios"]
-            .as_array()
-            .map(Vec::len),
-        Some(0)
-    );
-}
-
-#[test]
-fn a_scenario_that_asks_for_more_than_the_ceiling_is_capped_on_the_way_in() {
-    let server = Server::start();
-    let over = CEILING_BYTES + 64 * MIB;
-    let (status, body) = server.post_json(
-        "/scenarios/load",
-        &format!(
-            r#"{{"name":"greedy","version":"1","workload":{{"controller":{{"max_memory_bytes":{over}}}}}}}"#
-        ),
-    );
-    assert_eq!(status, 200, "body was {body}");
-    assert_eq!(
-        body["workload"]["controller"]["max_memory_bytes"],
-        ceiling()
-    );
-    // And the capped value is what runs.
-    assert_eq!(
-        server.post_json("/scenarios/run", r#"{"name":"greedy"}"#).1["controller"]["max_memory_bytes"],
-        ceiling()
-    );
-}
-
-#[test]
-fn the_scenario_listing_is_sorted_so_it_can_be_diffed() {
-    let server = Server::start();
-    for name in ["zulu", "alpha", "mike"] {
-        assert_eq!(
-            server
-                .post_json(
-                    "/scenarios/load",
-                    &format!(r#"{{"name":"{name}","version":"1","workload":{{}}}}"#),
-                )
-                .0,
-            200
-        );
-    }
-    let listing = server.get("/scenarios").1;
-    let names: Vec<&str> = listing["scenarios"]
-        .as_array()
-        .expect("an array")
-        .iter()
-        .map(|entry| entry["name"].as_str().expect("a name"))
-        .collect();
-    assert_eq!(names, ["alpha", "mike", "zulu"]);
+    assert_eq!(state["cpu"]["workers"], 4);
 }
 
 /// The value of a single-sample metric in a Prometheus exposition body.
@@ -3340,47 +2693,6 @@ fn the_scenario_listing_is_sorted_so_it_can_be_diffed() {
 /// as `f64` would work too, and would also throw away the guarantee being checked: these are
 /// nanosecond counts, which a 53-bit mantissa happens to represent exactly here but which need not
 /// be rounded through a float to prove it.
-/// A float sample from the exposition, for the metrics that are not integer counts.
-fn metric_f64(body: &str, name: &str) -> f64 {
-    body.lines()
-        .filter_map(|line| line.strip_prefix(name))
-        .find_map(|rest| rest.strip_prefix(' '))
-        .and_then(|value| value.trim().parse::<f64>().ok())
-        .unwrap_or_else(|| panic!("{name} has no sample in:\n{body}"))
-}
-
-/// The experiment block of the `/metrics` response.
-fn experiment(metrics: &Value) -> &Value {
-    &metrics["experiment"]
-}
-
-/// The current wall clock in Unix seconds.
-fn unix_seconds() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("a clock after 1970")
-        .as_secs() as i64
-}
-
-/// Wait until the controller has observed a configured `start_time`.
-///
-/// The desired state changes synchronously with the request but the runtime observation changes on
-/// the next tick, so a scrape straight after a patch can legitimately report the previous run's
-/// clock. Waiting on the offset rather than sleeping a guessed interval is what keeps these tests
-/// from being either flaky or slow.
-fn wait_for_start_offset(server: &Server) -> Value {
-    server.wait_metrics("the configured start time to be observed", |metrics| {
-        experiment(metrics)["start_offset_seconds"].is_number()
-    })
-}
-
-/// Seconds since `t = 0`, which is what the workload's expressions are evaluated against.
-fn experiment_elapsed(metrics: &Value) -> f64 {
-    experiment(metrics)["elapsed_seconds"]
-        .as_f64()
-        .expect("experiment.elapsed_seconds is a number")
-}
-
 fn metric_u64(body: &str, name: &str) -> u64 {
     body.lines()
         .filter_map(|line| line.strip_prefix(name))
@@ -3462,8 +2774,7 @@ fn the_exported_series_are_the_same_across_scrapes() {
 /// or a URL. Both are unbounded and both are attacker- or operator-controlled, so either one as a
 /// label value is a cardinality bomb aimed at whatever stores the metrics.
 ///
-/// The workload below is built specifically to try: expressions with `sin()`, a network target, a
-/// file path and a long scenario name with version metadata in it.
+/// The workload below is built specifically to try: expressions with `sin()` and a network target.
 #[test]
 fn no_label_is_derived_from_an_expression_a_url_or_any_other_user_input() {
     let server = Server::start();
@@ -3473,7 +2784,7 @@ fn no_label_is_derived_from_an_expression_a_url_or_any_other_user_input() {
         "/workload",
         r#"{"running":true,
             "controller":{"max_memory_bytes":268435456},
-            "anonymous":{"rss":"64MiB + 32MiB*sin(t/7)"},
+            "memory":{"anonymous_rss":"64MiB + 32MiB*sin(t/7)"},
             "file_backed":{"rss":"32MiB + 8MiB*sin(t/11)"},
             "cpu":{"utilization":"100 + 50*sin(t/3)"},
             "memory_access":{"pattern":"working_set","working_set_pages":64,"pages_per_second":500},
@@ -3481,17 +2792,6 @@ fn no_label_is_derived_from_an_expression_a_url_or_any_other_user_input() {
             "network":{"target":"198.51.100.77:9999","messages_per_second":1000}}"#,
     );
     assert_eq!(status, 200);
-    assert_eq!(
-        server
-            .post_json(
-                "/scenarios/load",
-                r#"{"name":"a-very-long-scenario-name-a-very-long-scenario-name-a-very-long-scenario-name",
-                    "version":"9.9.9-alpha+build.42","workload":{"anonymous":{"rss":"1MiB"}}}"#,
-            )
-            .0,
-        200
-    );
-    assert_eq!(server.post_json("/scenarios/run", r#"{"name":"a-very-long-scenario-name-a-very-long-scenario-name-a-very-long-scenario-name"}"#).0, 200);
     server.wait_metrics("the controller to tick", |metrics| {
         metrics["controller"]["tick_count"].as_f64().unwrap_or(0.0) > 0.0
     });
@@ -3507,12 +2807,7 @@ fn no_label_is_derived_from_an_expression_a_url_or_any_other_user_input() {
 
     // And nothing that looks like the input is present anywhere in the output, which also catches
     // an expression leaking into a HELP string or a metric name.
-    for needle in [
-        "sin(t",
-        "198.51.100.77",
-        "a-very-long-scenario-name",
-        "9.9.9-alpha",
-    ] {
+    for needle in ["sin(t", "198.51.100.77"] {
         assert!(
             !after.contains(needle),
             "{needle:?} reached the exposition:\n{after}"
@@ -3540,8 +2835,7 @@ fn the_only_labels_are_the_thp_policy_enumeration_the_build_version_and_the_host
             "loadlab_build_info".to_owned(),
             // Host metadata, and the reason it is allowed where client-supplied values are not: its
             // values are bounded by the machine rather than chosen by a caller, so one series per
-            // process is the most this can ever be. The same reasoning does not extend to the
-            // experiment seed, which is why that is a value instead.
+            // process is the most this can ever be.
             "loadlab_host_info".to_owned(),
             "loadlab_thp_host".to_owned(),
             "loadlab_thp_requested".to_owned(),
@@ -3768,7 +3062,7 @@ fn health_stays_open_when_a_token_is_configured() {
 fn every_protected_endpoint_demands_the_token() {
     let server = Server::start_with_token("s3cret");
     // Read paths.
-    for path in ["/state", "/metrics", "/prometheus", "/scenarios"] {
+    for path in ["/state", "/metrics", "/prometheus"] {
         assert_eq!(
             server.get(path).0,
             401,
@@ -3782,9 +3076,6 @@ fn every_protected_endpoint_demands_the_token() {
         ("PATCH", "/workload", Some("{}")),
         ("POST", "/workload/start", None),
         ("POST", "/workload/stop", None),
-        ("POST", "/scenarios/load", Some("{}")),
-        ("POST", "/scenarios/run", Some("{}")),
-        ("POST", "/scenarios/stop", None),
     ] {
         // The property is one-directional: the wall must be complete, so a 401 everywhere is the
         // requirement. Whether each of these then rejects its payload for its own reasons is a

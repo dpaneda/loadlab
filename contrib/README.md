@@ -29,7 +29,7 @@ promtool check rules     contrib/prometheus/loadlab.rules.yml
 
 `contrib/grafana/loadlab.json` has 50 panels across ten rows: state, the control loop,
 CPU, memory detail, file-backed memory, shared memory, disk I/O, transparent huge pages,
-controller health, and the CPU/page-fault cost of running the experiment. Every panel queries the
+controller health, and the CPU/page-fault cost of running the workload. Every panel queries the
 metrics that loadlab exposes, and each expression was verified against a live Prometheus
 scraping a running instance, so no panel is "No data".
 

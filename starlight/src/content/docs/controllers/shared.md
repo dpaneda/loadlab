@@ -2,6 +2,18 @@
 title: "Shared memory and copy-on-write"
 ---
 
+> **In short.** `shared.shared_bytes` plus `shared.private_bytes` and `actors` run the controller
+> that exists to make the difference between `Rss` and `Pss` first-class: real processes map one
+> shared segment, each also maps a private copy, and the double-count is measured, not footnoted.
+> Bounded by `--max-shared-bytes` (default 2 GiB). Minimal form:
+>
+> ```json
+> {"shared":{"shared_bytes":"512MiB","private_bytes":"128MiB","actors":4,"cow_write_ratio":0.5}}
+> ```
+>
+> What to watch in `GET /metrics` under `controller.shared`: `accounted_bytes`,
+> `physical_bytes`, `shared_overcount_bytes`, `converged`.
+
 `shared.shared_bytes` is a single segment that every actor maps `MAP_SHARED`, and
 `shared.private_bytes` is a second segment that each actor maps `MAP_PRIVATE` and writes to. The
 two together are the point of this controller: the shared segment is one copy of physical memory

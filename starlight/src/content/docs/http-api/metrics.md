@@ -27,13 +27,8 @@ Notable fields:
 | `controller.shared.*` | the shared-memory and copy-on-write controller; see [Shared memory and copy-on-write](../../controllers/shared/#shared-memory-and-copy-on-write) |
 | `controller.io.*` | the disk I/O controller; see [Disk I/O](../../controllers/io/#disk-io) |
 | `controller.network.*` | the TCP/UDP traffic generator; see [Network](../../controllers/network/#network) |
-| `experiment.*` | which run these numbers belong to; see [The experiment](../../experiment/#the-experiment) |
 | `host.*` | the host the numbers were produced on; see [The host](../../host/#the-host) |
 | `controller.thp.*` | the requested/effective transparent huge page policy; see [Transparent huge pages](../../controllers/thp/#transparent-huge-pages) |
-
-There is no `scenarios.active` field here. The active scenario is published under
-`experiment.active_scenario`, because it is part of the run's identity rather than a property of the
-controller; [`GET /scenarios`](../scenarios/#get-scenarios) is where the scenario store itself is listed.
 
 ## GET /prometheus
 
@@ -61,7 +56,7 @@ The exposition carries four labelled metrics and no others:
 
 Every other metric is a bare gauge or counter, so the series count is fixed and known without
 scraping. Nothing a client controls becomes a label value: not a workload expression, not a network
-target, not a file path, not a scenario name or version. Those are unbounded and operator-supplied,
+target, not a file path. Those are unbounded and operator-supplied,
 so any of them as a label would make the cardinality of the exposition a function of its own input,
 which is how a metrics backend falls over. The four policies are a closed enumeration published in
 full on every scrape, so the THP series do not appear and disappear with the requested setting.
@@ -72,11 +67,6 @@ on a 64-core one are the same numbers meaning different things. Its values are b
 machine rather than chosen by a caller, so it contributes exactly one series per process and cannot
 grow. `cpu_model` is `unknown` when `/proc/cpuinfo` does not carry one, because an empty label
 matches nothing in a query written for a real model.
-
-The experiment seed is deliberately **not** a label, for the reason above taken one step further: it
-is client-supplied *and* it changes between runs, so as a label it would mint a new series per seed
-and fragment the history behind each one. It is a gauge value instead, so `changes()` finds the runs
-that used different seeds.
 
 ### Metric names
 
@@ -92,8 +82,6 @@ string formatting here.
 | `loadlab_build_info` | gauge | always 1, labelled with `version` |
 | `loadlab_host_info` | gauge | always 1, labelled with the kernel, machine, CPU model and core count |
 | `loadlab_process_uptime_seconds` | gauge | seconds since process start |
-| `loadlab_experiment_seed` | gauge | the configured seed, or `0` when none is |
-| `loadlab_experiment_elapsed_seconds` | gauge | seconds since `t = 0` for the current run |
 | `loadlab_workload_running` | gauge | 1 when `running` is true |
 | `loadlab_configured_max_memory_bytes` | gauge | effective operator ceiling |
 | `loadlab_configured_tolerance_bytes` | gauge | convergence tolerance |
@@ -258,12 +246,6 @@ unaffected by the first-scrape baseline.
 - `loadlab_network_errors_total` tracks failed socket operations (connects, writes, sends). An increasing
   counter indicates unreachable targets, closed connections, or network dropouts. Alert on
   `increase(loadlab_network_errors_total[5m]) > 0`.
-- `loadlab_experiment_elapsed_seconds` going *backwards* is a new run, not a fault. It resets when the
-  workload starts and when `experiment.start_time` changes, so a recording that plots it as a
-  continuous line will draw a cliff at every restart. Segment on it, or join it against
-  `loadlab_experiment_seed` and `loadlab_host_info` and treat each `(seed, host)` pair as its own
-  series. `loadlab_experiment_seed == 0` means no seed was configured, so that run is not
-  reproducible and should not be compared against one that was.
 
 ### Scraping cost
 

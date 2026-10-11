@@ -2,6 +2,18 @@
 title: "File-backed memory"
 ---
 
+> **In short.** `file_backed.rss` targets memory backed by a real file loadlab creates and maps
+> `MAP_SHARED` — RAM *and* disk, with the page-cache and writeback behaviour anonymous memory
+> never has. The file is bounded by `--max-file-backed-bytes` (default 1 GiB) and lives in the
+> directory given to `--file-backed-dir`. Minimal form:
+>
+> ```json
+> {"file_backed":{"rss":"256MiB","pages_per_second":2000}}
+> ```
+>
+> What to watch in `GET /metrics` under `controller.file_backed`: `requested_rss_bytes` vs
+> `target_rss_bytes`, the actual fault rate, `saturated`, `converged`.
+
 `file_backed.rss` targets memory backed by a file loadlab creates, maps `MAP_SHARED`, and writes
 through. The distinction from `memory.anonymous_rss` is not cosmetic: an anonymous page is
 memory the kernel had to find, while a file page comes out of the page cache, occupies a block

@@ -19,11 +19,14 @@ controller says so rather than rounding up to the target.
 ## What this book covers
 
 - **[Getting started](../getting-started/)** — build it, drive it with `curl`, read it back.
-- **[Configuration](../configuration/)** — the process flags and their safety ceilings.
-- **[Concepts](../expressions/)** — the expression contract, the experiment clock, and host identity.
-- **[Controllers](../controllers/cpu/)** — one chapter per resource dimension: what it models, what
-  it observes, and what it refuses to fake.
+- **[Core concepts](../concepts/)** — the whole mental model in one page: controllers and
+  expressions at a glance.
+- **[Going further](../examples/)** — workloads that ramp, breathe and layer, all in expressions.
+- **[Expressions](../expressions/)** — the full expression language: `t`, units, grammar, clamping.
+- **[Controllers](../controllers/overview/)** — the catalog of what exists and what each one is
+  for, then one page per controller.
 - **[HTTP API](../http-api/authentication/)** — every endpoint, field and error code.
-- **[Reference](../architecture/)** — the internal model and how to deploy it.
+- **[Reference](../configuration/)** — the process flags, the host, the internal model, and how to
+  deploy it.
 
 The base URL throughout is `http://127.0.0.1:8080` unless a chapter says otherwise.

@@ -112,9 +112,9 @@ pub fn spawn(
                 let baseline = runtime
                     .read()
                     .map_or(0, |status| status.baseline_rss_anon_bytes);
-                // `t` for expressions comes from the experiment clock, not from process uptime. The
-                // clock re-anchors when the workload starts or when `experiment.start_time` changes,
-                // so this is the only place in a tick where the identity of the run is decided.
+                // `t` for expressions comes from the run clock, not from process uptime. The clock
+                // re-anchors when the workload starts, so this is the only place in a tick where the
+                // start of the run is decided.
                 //
                 // A write lock, because the clock moves in place. The alternative -- read it, decide
                 // whether it moved, then take a second lock to move it -- leaves a window in which
@@ -122,22 +122,8 @@ pub fn spawn(
                 // theoretical. Nothing in this critical section blocks: two clock reads.
                 let elapsed_seconds = {
                     let mut status = runtime.write().unwrap_or_else(PoisonError::into_inner);
-                    if let crate::experiment::Observed::Rejected(error) = status
-                        .experiment
-                        .observe(config.running, config.experiment.start_time.as_deref())
-                    {
-                        // Unreachable through the API, which parses the timestamp on the way in, so
-                        // reaching this means a bug rather than a client mistake. The run continues
-                        // from its start rather than stopping: a workload lab that refuses to run
-                        // because of an unreadable timestamp is worse than one that says `t` is the
-                        // age of the run.
-                        warn!(
-                            %error,
-                            "experiment.start_time could not be used; measuring this run from the \
-                             moment it started instead"
-                        );
-                    }
-                    status.experiment.elapsed_seconds()
+                    status.run_clock.observe(config.running);
+                    status.run_clock.elapsed_seconds()
                 };
                 // Read before taking the write lock below: this is a sysfs read, and the lock
                 // should not be held across I/O.
@@ -369,29 +355,8 @@ fn access_spec(config: &WorkloadState) -> AccessSpec {
         pattern: config.memory_access.pattern.clone(),
         working_set_pages: config.memory_access.working_set_pages,
         stride_pages: config.memory_access.stride_pages,
-        random_seed: effective_seed(
-            config,
-            config.memory_access.random_seed,
-            crate::experiment::Stream::MemoryAccess,
-        ),
+        random_seed: config.memory_access.random_seed,
     }
-}
-
-/// The seed a controller should actually use.
-///
-/// The experiment seed is the fallback and a controller's own `random_seed` is the override, so a
-/// scenario that set one explicitly keeps the walk it always had, and one that set neither becomes
-/// reproducible from a single number.
-///
-/// Resolved on every tick rather than once, because the three call sites compare their settings
-/// against the live controller and rebuild when they differ. That is also what makes a seed change
-/// at runtime take effect immediately instead of at the next restart.
-fn effective_seed(
-    config: &WorkloadState,
-    controller_seed: Option<u64>,
-    stream: crate::experiment::Stream,
-) -> Option<u64> {
-    crate::experiment::stream_seed(config.experiment.seed, controller_seed, stream)
 }
 
 /// Build the `PoolSpec` a configuration calls for.
@@ -631,7 +596,7 @@ fn evaluate_optional_bytes(
 
 /// Reconcile the shared memory and copy-on-write controller against the configuration.
 ///
-/// Both targets are zero while stopped, so a paused experiment reports no segment and no actors
+/// Both targets are zero while stopped, so a stopped workload reports no segment and no actors
 /// rather than a live-looking target. That matters more here than for the other controllers: an
 /// actor is a process, so "stopped" has to mean the processes are gone rather than idle.
 fn reconcile_shared(
@@ -803,7 +768,7 @@ fn reconcile_file_backed(
     let faults = procfs::fault_stats()?;
 
     // Both targets are zero while stopped, whatever the expressions would say, so a paused
-    // experiment reports a quiet file-backed controller rather than a live-looking target.
+    // a stopped workload reports a quiet file-backed controller rather than a live-looking target.
     let target_rss_bytes = if config.running {
         match &config.file_backed.rss {
             Some(setting) => {
@@ -856,11 +821,7 @@ fn reconcile_file_backed(
         config.file_backed.access_pattern,
         config.file_backed.working_set_pages,
         config.file_backed.stride_pages,
-        effective_seed(
-            config,
-            config.file_backed.random_seed,
-            crate::experiment::Stream::FileBacked,
-        ),
+        config.file_backed.random_seed,
     );
     controller.apply_policy(config.file_backed.madvise_policy()?)?;
 
@@ -937,11 +898,9 @@ fn reconcile_io(
         (0.0, 0.0, 0.0, 0.0)
     };
 
-    let mut settings = config
+    let settings = config
         .io
         .settings(config.running, read_bps, write_bps, iops, fsync_rate);
-    settings.random_seed =
-        effective_seed(config, settings.random_seed, crate::experiment::Stream::Io);
     let quiet = settings.read_bps == 0.0
         && settings.write_bps == 0.0
         && settings.iops == 0.0

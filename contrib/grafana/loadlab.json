@@ -3245,7 +3245,7 @@
     },
     {
       "type": "row",
-      "title": "Cost of running the experiment",
+      "title": "Cost of running the workload",
       "gridPos": {
         "h": 1,
         "w": 24,
@@ -3259,7 +3259,7 @@
     {
       "type": "timeseries",
       "title": "CPU",
-      "description": "User and system CPU in cores, 1.0 being one fully busy core. This doubles as the cost of the experiment and the cost of the monitoring: every scrape reads /proc/self/smaps_rollup, which walks the page tables and gets more expensive as the arena grows, so at 1s against a 600 MiB arena this graph is where that shows up.",
+      "description": "User and system CPU in cores, 1.0 being one fully busy core. This doubles as the cost of the workload and the cost of the monitoring: every scrape reads /proc/self/smaps_rollup, which walks the page tables and gets more expensive as the arena grows, so at 1s against a 600 MiB arena this graph is where that shows up.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"

@@ -35,7 +35,7 @@ Consider using loadlab if you:
  - Need the gap between what you asked for and what the kernel delivered — per controller, live.
  - Want to reproduce page-cache, writeback, reclaim or COW behaviour on purpose, with
    attribution between the thread generating pressure and everything else.
- - Need a run that is **reproducible**: one seed plus one start time identifies it exactly.
+ - Need a run that is **reproducible**: a per-controller `random_seed` replays the same walk.
  - Prefer a control plane you can `curl` over a config file and a restart.
 
 If you want a throughput number for a database or an HTTP service rather than for the
@@ -59,7 +59,7 @@ cargo run --release
 ```bash
 curl -s -X PUT localhost:8080/workload \
   -H 'content-type: application/json' \
-  -d '{"anonymous":{"rss":"512MiB"}}'
+  -d '{"memory":{"anonymous_rss":"512MiB"}}'
 
 curl -s -X POST localhost:8080/workload/start
 ```
@@ -92,18 +92,17 @@ curl -s -X PATCH localhost:8080/workload \
 | `PUT /workload` | replace the whole desired state |
 | `PATCH /workload` | merge a partial update into it |
 | `POST /workload/start` / `stop` | run or halt the workload |
-| `GET /state` | the desired state, normalized |
-| `GET /metrics` | JSON: host identity, the run's identity, and every observation |
+| `GET /state` | the desired state |
+| `GET /metrics` | JSON: host identity and every observation |
 | `GET /prometheus` | the same numbers as a Prometheus exposition |
-| `POST /scenarios/load` / `run` / `stop`, `GET /scenarios` | named, versioned workloads |
 | `GET /health` | liveness; the one endpoint that never needs a token |
 
 ### What you can drive
 
 | Controller | Knobs |
 |---|---|
-| anonymous memory | `rss`, `thp` (`madvise`/`always`/`never`) |
-| memory access | `pattern` (sequential, random, stride, working_set, hot_cold, cold_scan), `pages_per_second` |
+| anonymous memory | `memory.anonymous_rss`, `memory.thp` |
+| memory access | `memory_access.pattern` (sequential, random, stride, working_set, hot_cold, cold_scan), `memory_access.pages_per_second` |
 | file-backed memory | `rss`, `pages_per_second`, `access_pattern`, `madvise` |
 | shared / copy-on-write | `shared_bytes`, `private_bytes`, `actors`, `cow_write_ratio`, memfd or SysV |
 | disk I/O | `read_bps`, `write_bps`, `iops`, `fsync_rate`, `block_size`, `queue_depth`, `pattern`, `direct` |
@@ -118,7 +117,7 @@ than a step. This covers RSS and page rates, `read_bps`/`write_bps`, `iops`, `fs
 `cpu.utilization`, the network rates and `cow_write_ratio`:
 
 ```json
-{ "anonymous": { "rss": "min(2GiB, t * 64MiB)" } }
+{ "memory": { "anonymous_rss": "min(2GiB, t * 64MiB)" } }
 { "cpu":        { "utilization": "min(400, t * 80)" } }
 { "network":    { "messages_per_second": "500 + 250*sin(t/286.5)" } }
 ```
@@ -127,26 +126,6 @@ than a step. This covers RSS and page rates, `read_bps`/`write_bps`, `iops`, `fs
 fields expand unit suffixes (`"64MiB"`); dimensionless ones reject them. Counts and choices
 (`workers`, `concurrency`, `io.block_size`, the seeds) stay literal. See
 [the expression contract](starlight/src/content/docs/expressions.md).
-
-### Scenarios
-
-A scenario is a stored, versioned workload you can replay:
-
-```bash
-curl -s -X POST localhost:8080/scenarios/load -H 'content-type: application/json' -d '{
-  "name": "ramp", "version": "1",
-  "workload": {
-    "memory": { "anonymous_rss": "min(2GiB, t * 64MiB)" },
-    "cpu":    { "utilization": "min(400, t * 80)", "workers": 8 },
-    "io":     { "read_bps": 134217728, "write_bps": 67108864, "direct": true }
-  }}'
-
-curl -s -X POST localhost:8080/scenarios/run -H 'content-type: application/json' \
-  -d '{"name":"ramp"}'
-```
-
-A scenario is validated when it is defined, so running one cannot fail for a reason loading it
-did not report. Changing a scenario means bumping its version.
 
 ### Direct I/O
 
@@ -184,13 +163,12 @@ Every flag has an environment variable of the same name in `LOADLAB_` upper case
 | `--api-token` | unset | Bearer token required on every endpoint but `/health` |
 | `--max-body-bytes` | 65536 | largest accepted request body |
 | `--mutation-rate-per-second` / `--mutation-burst` | 20 / 40 | mutations accepted before `429` |
-| `--seed` / `--start-time` | unset | make a run reproducible; `t = 0` at a fixed RFC 3339 instant |
 | `--sink` | unset | run as a discarding TCP/UDP endpoint instead |
 
 ### Safety
 
 The ceilings are the point of the tool. Memory and disk are clamped and reported as
-`saturated` rather than refused, so an experiment degrades visibly instead of failing
+`saturated` rather than refused, so a run degrades visibly instead of failing
 mysteriously. The network ceiling is separate for a different reason: it is the one limit that
 protects systems other than the one running loadlab.
 
@@ -213,7 +191,7 @@ loadlab does not terminate TLS; put it behind a reverse proxy if the port leaves
 
 ```bash
 make check     # cargo check
-make test      # 229 unit + 102 integration tests
+make test      # 206 unit + 79 integration tests
 make fmt       # cargo fmt
 make smoke     # scripts/smoke.sh against a running instance
 make docs      # build the Starlight site into starlight/dist
@@ -237,9 +215,10 @@ Pages.
 |---|---|
 | [Introduction](starlight/src/content/docs/introduction.md) | what loadlab is and the model it is built around |
 | [Quick start](starlight/src/content/docs/getting-started.md) | build it, drive it with `curl`, read it back |
-| [Configuration](starlight/src/content/docs/configuration.md) | process flags and their safety ceilings |
-| [Continuous magnitudes](starlight/src/content/docs/expressions.md) | the number-or-expression contract |
-| [Controllers](starlight/src/content/docs/controllers/cpu.md) | CPU, memory, disk I/O and network, one chapter each |
+| [Core concepts](starlight/src/content/docs/concepts.md) | controllers and expressions at a glance |
+| [Going further](starlight/src/content/docs/examples.md) | workloads that ramp, breathe and layer |
+| [Expressions](starlight/src/content/docs/expressions.md) | the full expression language: `t`, units, grammar, clamping |
+| [Controllers](starlight/src/content/docs/controllers/overview.md) | the catalog, then one page per controller |
 | [HTTP API](starlight/src/content/docs/http-api/authentication.md) | every endpoint, field and error code |
 | [Architecture](starlight/src/content/docs/architecture.md) · [Deploying](starlight/src/content/docs/deploy.md) | internals and systemd |
 | [`contrib/`](contrib/) | Grafana dashboard, alert rules, Prometheus and Compose examples |

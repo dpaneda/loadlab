@@ -16,7 +16,6 @@ Every flag has an environment variable of the same name in `LOADLAB_` upper case
 | `--api-token` | unset | Bearer token required on every endpoint but `/health` |
 | `--max-body-bytes` | 65536 | largest accepted request body |
 | `--mutation-rate-per-second` / `--mutation-burst` | 20 / 40 | mutations accepted before `429` |
-| `--seed` / `--start-time` | unset | make a run reproducible; `t = 0` at a fixed RFC 3339 instant |
 | `--sink` | unset | run as a discarding TCP/UDP endpoint instead |
 
 These are the *process* limits. The per-workload desired-state fields that a client writes over
@@ -26,7 +25,7 @@ HTTP — `controller.tick_ms`, the memory, CPU, I/O and network knobs — are ca
 ## Safety
 
 The ceilings are the point of the tool. Memory and disk are clamped and reported as `saturated`
-rather than refused, so an experiment degrades visibly instead of failing mysteriously. The network
+rather than refused, so a run degrades visibly instead of failing mysteriously. The network
 ceiling is separate for a different reason: it is the one limit that protects systems other than
 the one running loadlab.
 

@@ -3,7 +3,7 @@
 //! This is deliberately not an HTTP client. The useful question for a Linux workload laboratory
 //! is what the *stack* does under raw load, so the generator speaks TCP and UDP directly and
 //! leaves the application protocol out of it. A
-//! separate "sink" mode turns loadlab itself into a blackhole, so an experiment needs no external
+//! separate "sink" mode turns loadlab itself into a blackhole, so a workload needs no external
 //! destination and the integration tests can run anywhere.
 //!
 //! The design choices that matter, and why:

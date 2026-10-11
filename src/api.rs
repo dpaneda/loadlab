@@ -1,7 +1,5 @@
 use std::sync::{Arc, RwLock};
 
-use std::collections::HashMap;
-
 use axum::{
     Json, Router,
     extract::{DefaultBodyLimit, State, rejection::JsonRejection},
@@ -10,7 +8,7 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post, put},
 };
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::{Map, Value};
 
 use crate::{
@@ -43,19 +41,12 @@ pub struct AppState {
     /// The host this process is running on, read once at startup.
     ///
     /// Held rather than re-read per scrape because none of it changes while loadlab runs, and a
-    /// measurement's meaning depends on it: two runs of the same scenario on different hosts are
-    /// the same series and different events.
+    /// measurement's meaning depends on it: two runs on different hosts are the same series and
+    /// different events.
     pub host: HostInfo,
     /// Built once at startup and shared by every scrape. Metric names are validated for
     /// uniqueness here rather than on each request.
     pub metrics: Arc<metrics::Metrics>,
-    pub scenarios: Arc<RwLock<HashMap<String, Scenario>>>,
-    /// Name of the scenario currently driving the workload, if any.
-    ///
-    /// Kept apart from the desired state rather than inside it, because it is a fact about *how*
-    /// the state was installed, not part of the state itself. Any direct `/workload` write clears
-    /// it, so it cannot outlive the request that set it.
-    pub active_scenario: Arc<RwLock<Option<String>>>,
 }
 
 /// Build the API.
@@ -76,10 +67,6 @@ pub fn router(state: AppState, security: Security, max_body_bytes: usize) -> Rou
         .route("/workload/stop", post(stop))
         .route("/metrics", get(metrics))
         .route("/prometheus", get(prometheus))
-        .route("/scenarios", get(list_scenarios))
-        .route("/scenarios/load", post(load_scenario))
-        .route("/scenarios/run", post(run_scenario))
-        .route("/scenarios/stop", post(stop_scenario))
         .layer(DefaultBodyLimit::max(max_body_bytes))
         .layer(middleware::from_fn(move |request, next| {
             limit_body_size(max_body_bytes, request, next)
@@ -108,12 +95,9 @@ async fn put_workload(
     payload: Result<Json<WorkloadState>, JsonRejection>,
 ) -> Result<Json<WorkloadState>, LoadlabError> {
     let Json(mut value) = payload.map_err(json_rejection)?;
-    value.normalize();
     apply_limits(&mut value, app.limits);
     value.validate()?;
     *write_lock(&app.workload) = value.clone();
-    // The desired state is now whatever this request said, not whatever a scenario said.
-    *write_lock(&app.active_scenario) = None;
     Ok(Json(value))
 }
 
@@ -132,12 +116,9 @@ async fn patch_workload(
     merge_patch(&mut value, &patch);
     let mut next: WorkloadState = serde_json::from_value(value)
         .map_err(|error| LoadlabError::InvalidConfig(error.to_string()))?;
-    next.normalize();
     apply_limits(&mut next, app.limits);
     next.validate()?;
     *guard = next.clone();
-    // Same as `PUT`: the workload is no longer the scenario's.
-    *write_lock(&app.active_scenario) = None;
     Ok(Json(next))
 }
 
@@ -150,8 +131,6 @@ async fn start(State(app): State<AppState>) -> Json<WorkloadState> {
 async fn stop(State(app): State<AppState>) -> Json<WorkloadState> {
     let mut state = write_lock(&app.workload);
     state.running = false;
-    // A stopped workload is not being driven by a scenario, whatever set it last.
-    *write_lock(&app.active_scenario) = None;
     Json(state.clone())
 }
 
@@ -169,13 +148,6 @@ async fn metrics(State(app): State<AppState>) -> Result<Json<MetricsResponse>, L
             cpu,
         },
         host: app.host.clone(),
-        experiment: ExperimentMetrics {
-            seed: workload.experiment.seed,
-            start_time: workload.experiment.start_time.clone(),
-            elapsed_seconds: runtime.experiment.elapsed_seconds(),
-            start_offset_seconds: runtime.experiment.start_offset_seconds(),
-            active_scenario: active_scenario(&app),
-        },
         workload,
         controller: ControllerMetrics {
             elapsed_seconds: runtime.started_at.elapsed().as_secs_f64(),
@@ -221,200 +193,6 @@ async fn prometheus(State(app): State<AppState>) -> Result<Response, LoadlabErro
         .render(&workload, &runtime, &memory, &faults, &cpu)
         .map_err(|error| LoadlabError::Internal(error.to_string()))?;
     Ok(([(header::CONTENT_TYPE, metrics::CONTENT_TYPE)], body).into_response())
-}
-
-/// The longest scenario name or version accepted.
-///
-/// Both are client-supplied strings that get stored and echoed, and a scenario store is the one
-/// place a client can add unbounded keys. Capping them keeps a single request from filling memory
-/// with identifiers, and the limit is generous for the identifiers this API actually needs.
-const SCENARIO_ID_MAX_LEN: usize = 128;
-
-/// A stored, versioned workload definition.
-///
-/// `workload` is stored already normalized and validated, so applying it cannot produce a state the
-/// direct `/workload` path would have rejected. That is what makes a scenario *deterministic* in
-/// the sense that matters: the same document always yields the same desired state, whichever
-/// spelling of the composite aliases it was written in.
-#[derive(Clone, Debug, Serialize)]
-pub struct Scenario {
-    pub name: String,
-    pub version: String,
-    /// The desired state, normalized. `running` is always `false` here: a scenario describes *what*
-    /// to generate, and whether it is generating is what `/scenarios/run` decides.
-    pub workload: WorkloadState,
-}
-
-/// Body of `POST /scenarios/load`.
-#[derive(Debug, Deserialize)]
-struct LoadScenario {
-    name: String,
-    version: String,
-    workload: serde_json::Value,
-}
-
-/// Body of `POST /scenarios/run` and `POST /scenarios/stop`.
-#[derive(Debug, Deserialize)]
-struct ScenarioName {
-    name: String,
-}
-
-#[derive(Debug, Serialize)]
-struct ScenarioList {
-    /// Name of the scenario currently driving the workload, if any.
-    ///
-    /// `null` after a direct `PUT`/`PATCH`/`/workload/stop`, because at that point the desired
-    /// state is no longer the scenario's. Reporting a scenario as active while the workload has
-    /// been changed underneath it is the specific lie this field must not tell.
-    active: Option<String>,
-    scenarios: Vec<ScenarioSummary>,
-}
-
-#[derive(Debug, Serialize)]
-struct ScenarioSummary {
-    name: String,
-    version: String,
-}
-
-/// Reject an identifier that is empty, over-long, or carries control characters.
-///
-/// Control characters are refused because a scenario name is echoed in JSON and in operator-facing
-/// logs; a name containing a newline would let a caller forge extra lines in whatever reads them.
-fn validate_scenario_id(field: &str, value: &str) -> Result<(), LoadlabError> {
-    if value.trim().is_empty() {
-        return Err(LoadlabError::InvalidConfig(format!(
-            "scenario {field} must not be empty"
-        )));
-    }
-    if value.len() > SCENARIO_ID_MAX_LEN {
-        return Err(LoadlabError::InvalidConfig(format!(
-            "scenario {field} must be at most {SCENARIO_ID_MAX_LEN} bytes"
-        )));
-    }
-    if value.chars().any(char::is_control) {
-        return Err(LoadlabError::InvalidConfig(format!(
-            "scenario {field} must not contain control characters"
-        )));
-    }
-    Ok(())
-}
-
-/// Look up a stored scenario by name.
-fn scenario_or_404<'a>(
-    scenarios: &'a HashMap<String, Scenario>,
-    name: &str,
-) -> Result<&'a Scenario, LoadlabError> {
-    scenarios
-        .get(name)
-        .ok_or_else(|| LoadlabError::InvalidConfig(format!("no scenario named {name:?} is loaded")))
-}
-
-/// The canonical serialization of a state, used to decide whether two documents are the same one.
-///
-/// The aliases are already folded in by the time this is called, so two scenarios that differ only
-/// in which spelling they used compare equal, which is what a version is supposed to mean.
-fn canonical_form(workload: &WorkloadState) -> String {
-    serde_json::to_string(workload).unwrap_or_default()
-}
-
-async fn list_scenarios(State(app): State<AppState>) -> Json<ScenarioList> {
-    let scenarios = read_lock(&app.scenarios);
-    let mut summaries: Vec<ScenarioSummary> = scenarios
-        .values()
-        .map(|scenario| ScenarioSummary {
-            name: scenario.name.clone(),
-            version: scenario.version.clone(),
-        })
-        .collect();
-    // Sorted so the listing is stable across calls. `HashMap` iteration order is not, and an
-    // endpoint whose output reorders itself between two identical requests is impossible to
-    // diff.
-    summaries.sort_by(|a, b| a.name.cmp(&b.name));
-    Json(ScenarioList {
-        active: read_lock(&app.active_scenario).clone(),
-        scenarios: summaries,
-    })
-}
-
-/// Store a named, versioned scenario without running it.
-async fn load_scenario(
-    State(app): State<AppState>,
-    payload: Result<Json<LoadScenario>, JsonRejection>,
-) -> Result<Json<Scenario>, LoadlabError> {
-    let Json(payload) = payload.map_err(json_rejection)?;
-    validate_scenario_id("name", &payload.name)?;
-    validate_scenario_id("version", &payload.version)?;
-
-    let mut workload: WorkloadState = serde_json::from_value(payload.workload)
-        .map_err(|error| LoadlabError::InvalidConfig(error.to_string()))?;
-    workload.normalize();
-    apply_limits(&mut workload, app.limits);
-    workload.validate()?;
-    // A stored scenario never carries `running`. Storing the flag would mean `run` had to decide
-    // whether to honour it, and a scenario that remembers being started is not a definition.
-    workload.running = false;
-
-    let scenario = Scenario {
-        name: payload.name.clone(),
-        version: payload.version.clone(),
-        workload,
-    };
-
-    let mut scenarios = write_lock(&app.scenarios);
-    if let Some(existing) = scenarios.get(&payload.name) {
-        // A version identifies a document. Re-loading a name with different content under the same
-        // version would make `version` meaningless and quietly break the reproducibility the
-        // version exists to provide, so it is refused rather than overwritten.
-        if existing.version == payload.version
-            && canonical_form(&existing.workload) != canonical_form(&scenario.workload)
-        {
-            return Err(LoadlabError::InvalidConfig(format!(
-                "scenario {:?} version {:?} is already loaded with different content; bump the \
-                 version to change it",
-                payload.name, payload.version
-            )));
-        }
-    }
-    scenarios.insert(payload.name.clone(), scenario.clone());
-    Ok(Json(scenario))
-}
-
-/// Apply a stored scenario and start it.
-async fn run_scenario(
-    State(app): State<AppState>,
-    payload: Result<Json<ScenarioName>, JsonRejection>,
-) -> Result<Json<WorkloadState>, LoadlabError> {
-    let Json(payload) = payload.map_err(json_rejection)?;
-    let scenario = {
-        let scenarios = read_lock(&app.scenarios);
-        scenario_or_404(&scenarios, &payload.name)?.clone()
-    };
-
-    // Re-validated on the way out even though it was validated on the way in. The process ceiling
-    // is fixed, so this cannot change the verdict today; it means the guarantee "a scenario can
-    // never install a state `/workload` would reject" is enforced by the code that installs it
-    // rather than by remembering that it was checked earlier.
-    let mut workload = scenario.workload.clone();
-    apply_limits(&mut workload, app.limits);
-    workload.validate()?;
-    workload.running = true;
-
-    *write_lock(&app.workload) = workload.clone();
-    *write_lock(&app.active_scenario) = Some(scenario.name);
-    Ok(Json(workload))
-}
-
-/// Stop the active scenario.
-///
-/// Equivalent to `POST /workload/stop` and deliberately so: a scenario drives the same single
-/// desired state as any other client write, so "stop the scenario" and "stop the workload" cannot
-/// mean different things. What this endpoint adds is clearing the active marker, so `GET /scenarios`
-/// stops claiming a scenario is driving a workload that is no longer running.
-async fn stop_scenario(State(app): State<AppState>) -> Json<WorkloadState> {
-    let mut workload = write_lock(&app.workload);
-    workload.running = false;
-    *write_lock(&app.active_scenario) = None;
-    Json(workload.clone())
 }
 
 #[derive(Debug, Serialize)]
@@ -473,57 +251,8 @@ struct MetricsResponse {
     process: ProcessMetrics,
     /// The host the numbers below were produced on.
     host: HostInfo,
-    /// Which run these numbers belong to.
-    experiment: ExperimentMetrics,
     workload: WorkloadState,
     controller: ControllerMetrics,
-}
-
-/// The identity of the current run.
-///
-/// Separate from `controller`, which describes the loop, and from `workload`, which describes what
-/// was asked for: this block is what an observation has to be filed under to mean anything later.
-#[derive(Debug, Serialize)]
-struct ExperimentMetrics {
-    /// The configured seed, or `null` when none is.
-    seed: Option<u64>,
-    /// The configured `t = 0`, or `null` when `t` is the age of the run.
-    start_time: Option<String>,
-    /// Seconds since `t = 0`, which is what the workload's expressions were evaluated against.
-    elapsed_seconds: f64,
-    /// Seconds between `start_time` and the moment the run was anchored.
-    ///
-    /// Present only with a configured `start_time`, and the thing that makes `elapsed_seconds`
-    /// readable: with an offset of `-600`, an `elapsed_seconds` of 300 is five minutes *before*
-    /// the experiment rather than five minutes into it.
-    start_offset_seconds: Option<f64>,
-    /// The scenario driving the workload, with the version that identifies its content.
-    ///
-    /// `null` for a workload installed directly, which is a different kind of run rather than an
-    /// older one.
-    active_scenario: Option<ActiveScenario>,
-}
-
-/// A scenario's name and the version of its content.
-#[derive(Debug, Serialize)]
-struct ActiveScenario {
-    name: String,
-    version: String,
-}
-
-/// Resolve the active scenario, if the scenario store still holds it.
-///
-/// Checked against the store on every scrape rather than cached, because `PUT /workload` clears the
-/// marker but leaves the store populated: a marker pointing at a scenario that has since been
-/// replaced is worse than no marker.
-fn active_scenario(app: &AppState) -> Option<ActiveScenario> {
-    let name = read_lock(&app.active_scenario).clone()?;
-    let scenarios = read_lock(&app.scenarios);
-    let scenario = scenarios.get(&name)?;
-    Some(ActiveScenario {
-        name: scenario.name.clone(),
-        version: scenario.version.clone(),
-    })
 }
 
 /// Apply RFC 7396 JSON Merge Patch semantics to `target`.

@@ -107,44 +107,22 @@ Two rules hold across both sources:
   separately produces halves that do not add up to the whole. Figures that are compared are read
   once and apportioned from that single sample.
 
-## 7. The experiment clock and the run's identity
+## 7. The run clock: what `t` means
 
-`src/experiment.rs` owns three things that have nothing to do with any one controller: what `t` means,
-how one seed becomes three independent ones, and how an RFC 3339 string becomes an instant.
+`src/clock.rs` owns the one thing no single controller owns: what `t` means when an expression
+evaluates it. `RunClock` holds a monotonic `Instant` origin and remembers whether the workload was
+running at the last observation. The origin moves only on the stopped-to-running transition — a new
+run begins at zero — and otherwise `t` is served straight from the monotonic clock.
 
-**The clock is anchored, not sampled.** `ExperimentClock` holds a monotonic `Instant` origin and an
-optional offset from a configured `start_time`. It re-anchors when the workload starts and when
-`start_time` changes, and otherwise advances from `Instant::elapsed`. The wall clock is read exactly
-once per anchor, at the moment the origin moves. Two reasons:
+Two properties follow:
 
-- reading `SystemTime` every tick would make `t` step backwards when NTP adjusts the clock, and every
-  expression in the workload would follow it;
-- the offset is enough. Once the distance between "now" and the configured instant is known, monotonic
-  time carries `t` from there without the wall clock being involved again.
-
-`observe` returns `Observed::{Unchanged, Reanchored, Rejected}` rather than a bare `bool` so the
-caller can log a timestamp it could not parse *once* instead of once per tick — at a 1ms tick, once
-per tick is a thousand identical log lines a second. A rejected timestamp still leaves a working
-clock: the run continues measured from its start, which is a claim loadlab can support, rather than
-refusing to run.
-
-**One seed, three walks.** `stream_seed` mixes the experiment seed with a per-stream domain constant
-through SplitMix64's finalizer. Seeds `1`, `2` and `3` given to three controllers must not produce
-walks a fixed distance apart, or patterns would be visibly correlated across runs and two controllers
-would look related in a recording. A controller's own `random_seed` bypasses the mixer entirely,
-because a scenario written against a specific walk has to keep producing that walk.
-
-**The RFC 3339 parser is hand-written** and so is the host reader's date-free arithmetic. The
-alternative is a date-time dependency for one field, and a workload generator that pulls in a calendar
-library to move a monotonic clock is a dependency nobody asked for. The parser accepts what RFC 3339
-requires for a wall-clock instant — `YYYY-MM-DDTHH:MM:SS[.fraction](Z|±HH:MM)` — and rejects the rest,
-including leap seconds, because there is no honest way to place `:60` on a monotonic timeline.
-
-**Identity is published, not stored twice.** `experiment` in the desired state is what a client asked
-for; `experiment` in `/metrics` is what the controller actually did with it. They are separate because
-they can differ: a requested `start_time` the controller could not parse leaves the desired state
-unchanged and the observation anchored elsewhere, and a recording that conflated the two would report
-the intent as the result.
+- **`t` is monotonic seconds of run age.** The wall clock is never read after startup, so NTP
+  stepping the wall clock cannot make `t` jump or go backwards, and time inside a long tick is not
+  skipped. A restart is a fresh run: the same workload stated again means the same thing it meant the
+  first time, which is what anchoring `t` to the run rather than the process buys.
+- **`t` is not process uptime.** Uptime keeps counting while the workload is stopped, and a `t` that
+  carried on across a pause would make the pause look like load. `observe(running)` is called once
+  per tick, and anything other than an actual start leaves the origin alone.
 
 **Host metadata is read once, at startup.** It cannot change while loadlab runs, and a failure to read
 it is a startup failure rather than a degraded scrape — a measurement that cannot say where it was

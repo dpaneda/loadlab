@@ -23,7 +23,7 @@ Returns the full desired workload state.
     "affinity": "auto"
   },
   "memory_access": {
-    "access_pattern": "sequential",
+    "pattern": "sequential",
     "pages_per_second": 10000
   },
   "file_backed": {
@@ -55,10 +55,6 @@ Returns the full desired workload state.
     "connections_per_second": 10.0,
     "messages_per_second": 5000.0,
     "message_size": 1024
-  },
-  "experiment": {
-    "seed": 42,
-    "start_time": null
   }
 }
 ```
@@ -73,16 +69,16 @@ Every field is optional, and every one of them defaults to generating nothing:
 | `controller.max_memory_bytes` | clamped | requested ceiling; see [Memory ceiling](../../controllers/memory-ceiling/#memory-ceiling) |
 | `memory.anonymous_rss` | none | number or expression, in bytes |
 | `memory.thp` | `"default"` | transparent huge page policy for the anonymous arena: `"default"`, `"always"`, `"madvise"` or `"never"`; see [Transparent huge pages](../../controllers/thp/#transparent-huge-pages) |
-| `memory_access.access_pattern` | `"sequential"` | which pages the fault loop walks |
+| `memory_access.pattern` | `"sequential"` | which pages the fault loop walks |
 | `memory_access.pages_per_second` | `0.0` | number or expression in `t`; target fault rate against the anonymous arena |
-| `memory_access.random_seed` | `1` | seed for the `random` pattern, so a run is reproducible |
+| `memory_access.random_seed` | none | for `random`, the seed; the walker falls back to `1`, so a run still reproduces |
 | `file_backed.rss` | none | number or expression, in bytes of file-backed memory |
 | `file_backed.access_pattern` | `"sequential"` | which pages the file-backed fault loop walks |
 | `file_backed.pages_per_second` | `0.0` | number or expression in `t`; target fault rate against the file |
 | `file_backed.madvise` | `"random"` | readahead policy; see [File-backed memory](../../controllers/file-backed/#file-backed-memory) |
-| `file_backed.working_set_pages` | `1024` | pages the `working_set` pattern cycles through |
-| `file_backed.stride_pages` | `1` | step for the `stride` pattern |
-| `file_backed.random_seed` | `1` | seed for the `random` pattern, so a run is reproducible |
+| `file_backed.working_set_pages` | none | pages the `working_set` pattern cycles through; falls back to `1024` |
+| `file_backed.stride_pages` | none | step for the `stride` pattern; falls back to `1` |
+| `file_backed.random_seed` | none | for `random`, the seed; the walker falls back to `1` |
 | `shared.shared_bytes` | none | number or expression, in bytes; the one segment every actor maps `MAP_SHARED` |
 | `shared.private_bytes` | none | number or expression, in bytes per actor; the segment each actor maps `MAP_PRIVATE` and writes |
 | `shared.backing` | `"memfd"` | kernel object: `"memfd"` or `"sysv"`; see [Shared memory](../../controllers/shared/#shared-memory-and-copy-on-write) |
@@ -97,7 +93,7 @@ Every field is optional, and every one of them defaults to generating nothing:
 | `io.queue_depth` | `1` | maximum in-flight operations per tick; `1` is strictly serial |
 | `io.pattern` | `"sequential"` | which blocks the walk visits: `"sequential"`, `"random"` or `"stride"` |
 | `io.stride_blocks` | none | for `"stride"`, the distance between blocks |
-| `io.random_seed` | none | for `"random"`, the seed, so a replay walks the same blocks |
+| `io.random_seed` | none | for `"random"`, the seed; the walker falls back to `1`, so a replay walks the same blocks |
 | `network.transport` | `"tcp"` | transport protocol: `"tcp"` or `"udp"` |
 | `network.target` | `""` | destination `host:port`; empty generates nothing |
 | `network.concurrency` | `1` | concurrent worker slots / connection pool size |
@@ -108,12 +104,6 @@ Every field is optional, and every one of them defaults to generating nothing:
 | `cpu.workers` | `0` | worker threads; `0` means one per selected CPU |
 | `cpu.cpus` | `[]` | logical CPU IDs to use; `[]` means all of them |
 | `cpu.affinity` | `"auto"` | `"auto"` or `"pin"` |
-| `experiment.seed` | none | fallback seed for every controller without its own `random_seed`; see [The experiment](../../experiment/#the-experiment) |
-| `experiment.start_time` | none | RFC 3339 instant to treat as `t = 0`; see [The experiment](../../experiment/#the-experiment) |
-
-`experiment` follows the same patch rule as everything else: a `PATCH` that does not mention it
-leaves the seed and start time alone, and a `PATCH` that does mention it starts both from their
-defaults, which means it clears them. To change one without the other, name both.
 
 A `PATCH` that does not mention a field leaves it alone; a `PATCH` that does mention one starts
 from the field's default. That is what makes the CPU defaults load-bearing: a patch that only

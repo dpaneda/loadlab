@@ -2,7 +2,7 @@
 //!
 //! Every continuous magnitude loadlab can be asked for -- a byte count, a ratio, a rate -- is a
 //! [`Setting`], so the same spelling works everywhere: a plain JSON number, or a string such as
-//! `"500 + 250*sin(t/286.5)"` evaluated once per tick against the experiment clock. What the
+//! `"500 + 250*sin(t/286.5)"` evaluated once per tick against the run clock. What the
 //! expression *means* is decided by the field it is written on and by the [`Dimension`] that field
 //! is interpreted in, not by the type: a `Setting` on `io.read_bps` is a byte rate, the same value
 //! on `cpu.utilization` is a percentage of a core.
@@ -38,7 +38,7 @@ impl Dimension {
     }
 }
 
-/// A constant number or an expression in the experiment clock `t`.
+/// A constant number or an expression in the run clock `t`.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Setting {
     /// A fixed number, used as-is.

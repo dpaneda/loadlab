@@ -5,10 +5,10 @@
 //! actually did.
 
 mod api;
+mod clock;
 mod controller;
 mod cpu;
 mod error;
-mod experiment;
 mod expression;
 mod file_backed;
 mod io;
@@ -24,7 +24,6 @@ mod shared;
 mod state;
 
 use std::{
-    collections::HashMap,
     net::SocketAddr,
     sync::{
         Arc, RwLock,
@@ -41,7 +40,7 @@ use tracing_subscriber::EnvFilter;
 
 use crate::{
     api::{AppState, Limits},
-    state::{ExperimentConfig, RuntimeStatus, WorkloadState},
+    state::{RuntimeStatus, WorkloadState},
 };
 
 #[derive(Debug, Parser)]
@@ -127,26 +126,6 @@ struct Args {
     /// over `--api-token`, since a command line is visible in `ps` to every user on the host.
     #[arg(long, env = "LOADLAB_API_TOKEN")]
     api_token: Option<String>,
-
-    /// Seed for the whole workload, for a repeatable run.
-    ///
-    /// The fallback for every controller that does not set its own `random_seed`, and the reason
-    /// one number can identify a run: same seed, same workload and same start time walks the same
-    /// memory access pattern, file-backed pattern and I/O path. Left unset, each controller keeps
-    /// its own default and the run is not reproducible.
-    #[arg(long, env = "LOADLAB_EXPERIMENT_SEED")]
-    seed: Option<u64>,
-
-    /// RFC 3339 instant to treat as `t = 0`, instead of the moment the workload started.
-    ///
-    /// The point of a stable time base: a scenario can carry expressions written against a shared
-    /// timeline, so two hosts running the same scenario at different moments agree on what `t` is.
-    /// Without it, `t` restarts whenever the workload does, and a restart partway through a
-    /// scenario no longer means the same thing.
-    ///
-    /// A timestamp in the future is accepted, and `t` is negative until it arrives.
-    #[arg(long, env = "LOADLAB_EXPERIMENT_START_TIME")]
-    start_time: Option<String>,
 
     /// Largest HTTP request body accepted, in bytes.
     ///
@@ -252,14 +231,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut initial = WorkloadState::default();
     initial.controller.max_memory_bytes = max_memory_bytes;
-    // Set here so a run started from the command line is as reproducible as one installed through
-    // the API, and so the value is visible in `GET /state` from the first request rather than only
-    // in the controller's own memory.
-    initial.experiment = ExperimentConfig {
-        seed: args.seed,
-        start_time: args.start_time,
-    };
-    initial.normalize();
     initial.validate()?;
 
     let baseline = crate::procfs::memory_stats()?.rss_anon_bytes;
@@ -278,8 +249,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         limits: Limits { max_memory_bytes },
         host: host.clone(),
         metrics: Arc::clone(&metrics),
-        scenarios: Arc::new(RwLock::new(HashMap::new())),
-        active_scenario: Arc::new(RwLock::new(None)),
     };
 
     let file_backed_dir = args

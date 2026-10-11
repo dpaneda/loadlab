@@ -16,21 +16,16 @@ export default defineConfig({
       sidebar: [
         { slug: 'introduction' },
         {
-          label: 'Getting started',
-          items: [{ slug: 'getting-started' }, { slug: 'configuration' }],
+          label: 'Start here',
+          items: [{ slug: 'getting-started' }, { slug: 'concepts' }, { slug: 'examples' }],
         },
-        {
-          label: 'Concepts',
-          items: [
-            { slug: 'expressions' },
-            { slug: 'experiment' },
-            { slug: 'host' },
-          ],
-        },
+        { slug: 'expressions' },
         {
           label: 'Controllers',
           items: [
+            { slug: 'controllers/overview' },
             { slug: 'controllers/cpu' },
+            { slug: 'controllers/memory' },
             { slug: 'controllers/page-access' },
             { slug: 'controllers/file-backed' },
             { slug: 'controllers/shared' },
@@ -49,14 +44,13 @@ export default defineConfig({
             { slug: 'http-api/workload' },
             { slug: 'http-api/composite-shape' },
             { slug: 'http-api/start-stop' },
-            { slug: 'http-api/scenarios' },
             { slug: 'http-api/errors' },
             { slug: 'http-api/metrics' },
           ],
         },
         {
           label: 'Reference',
-          items: [{ slug: 'architecture' }, { slug: 'deploy' }],
+          items: [{ slug: 'host' }, { slug: 'configuration' }, { slug: 'architecture' }, { slug: 'deploy' }],
         },
       ],
     }),

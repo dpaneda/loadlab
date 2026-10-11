@@ -1,43 +1,33 @@
 ---
-title: "The composite scenario shape"
+title: "The composite workload shape"
 ---
 
-A full workload is long: five or six top-level objects, each with a dozen fields. The **composite
-scenario shape** is a shorter spelling of the same thing, for the fields a scenario is normally
-written in terms of:
+A full workload names several controllers at once, and writing it usually wants one request rather
+than a round trip per object. The **composite shape** is any body that states more than one
+top-level object:
 
 ```json
 {
   "controller": { "max_memory_bytes": 536870912 },
-  "anonymous":  { "rss": "500MiB + 200MiB*sin(t/30)" },
+  "memory": { "anonymous_rss": "500MiB + 200MiB*sin(t/30)" },
   "file_backed": { "rss": "200MiB" },
   "cpu":        { "utilization": "100 + 50*sin(t/10)" },
-  "faults":     { "minor_rate": 10000 }
+  "memory_access": { "pages_per_second": 10000 }
 }
 ```
 
-Accepted by `PUT /workload`, `PATCH /workload` and `POST /scenarios/load`. Two aliases do the work:
-
-| Alias | Means |
-| --- | --- |
-| `anonymous.rss` | `memory.anonymous_rss` |
-| `faults.minor_rate` | `memory_access.pages_per_second` |
-
-`file_backed` and `cpu` are already top-level objects, so they are spelled the same way in both
-shapes.
+Accepted by `PUT /workload` and `PATCH /workload`, each of which could equally name just one of
+these objects. No field has an alias: the canonical names above are the only names, and a body
+never has to spell a controller it is not interested in.
 
 Three properties matter:
 
-- **An alias is accepted on input and never appears on output.** `GET /state` keeps reporting
-  `memory.anonymous_rss` and `memory_access.pages_per_second`, so a client that only knows the
-  canonical spelling is unaffected. The aliases are folded in before the state is stored, and
-  neither key is ever echoed back.
-- **The alias wins.** If a body carries both `anonymous.rss` and `memory.anonymous_rss`, the alias
-  is the one applied. This matters for `PATCH`, which merges into the existing state: patching the
-  alias onto a state that already carries the canonical field replaces it, so a client can move
-  between the two spellings without clearing the other one first.
-- **An unknown field is a `400`.** Both alias objects are closed. `faults.major_rate` in particular
-  is refused with an error naming `minor_rate` as the accepted field: this API has no major-fault
-  controller, and reporting success for a request that does nothing is the one outcome it never
-  produces.
-
+- **Every controller defaults to generating nothing.** A body that names `memory` but not `cpu`
+  leaves the CPU target at zero, and zero creates no worker threads at all. The fault rate is
+  `memory_access.pages_per_second`, the page pattern `memory_access.pattern`.
+- **The shape round-trips.** `GET /state` reports exactly the spelling that was accepted, and
+  reading `/state` and writing it back is a no-op: there is no normalization to reverse.
+- **A wrong type in a known field is a `400`; an unknown key is ignored.** `{"running": "yes"}`
+  is refused because a boolean belongs there, but a key loadlab does not know is skipped rather
+  than turning the whole request into an error. A typo in a field you meant to set will not fail
+  loudly, so read `/state` back and compare.

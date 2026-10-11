@@ -203,58 +203,14 @@ pub struct SharedRuntime {
     pub actor_accounting: Vec<ActorRuntime>,
 }
 
-/// Composite-scenario spelling of the anonymous arena: `{"anonymous": {"rss": ...}}`.
-///
-/// Accepted as an alias for [`MemoryConfig::anonymous_rss`] so the shorter composite spelling works
-/// verbatim. It is an *input* spelling only: [`WorkloadState::normalize`] folds it into the
-/// canonical field and clears it, and it is skipped when serializing, so `GET /state` publishes
-/// only canonical fields.
-///
-/// `deny_unknown_fields` because this is an alias, not a second place to configure memory. A typo
-/// has to be an error rather than a silently ignored key, which is the whole reason this alias
-/// exists instead of a free-form catch-all.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct AnonymousAlias {
-    /// Alias for `memory.anonymous_rss`.
-    pub rss: Option<Setting>,
-}
-
-/// Composite-scenario spelling of the page-fault target: `{"faults": {"minor_rate": ...}}`.
-///
-/// Accepted as an alias for [`MemoryAccessConfig::pages_per_second`]. Only the minor-fault rate is
-/// addressable: loadlab generates faults by touching pages, and every fault that produces is a
-/// minor one, so there is no major-fault rate a client could ask for and none is invented here.
-/// `deny_unknown_fields` makes `major_rate` a `400` naming the accepted field rather than a key
-/// that is accepted and thrown away.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct FaultsAlias {
-    /// Alias for `memory_access.pages_per_second`.
-    pub minor_rate: Option<Setting>,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct WorkloadState {
     pub running: bool,
-    /// What makes two runs of this state comparable after the fact.
-    ///
-    /// A workload describes what to generate; this describes which run it is. Kept separate from
-    /// the controllers because it is the one part of the state that does not change what the host
-    /// does -- it changes how the run can be interpreted afterwards.
-    pub experiment: ExperimentConfig,
     pub controller: ControllerConfig,
     pub memory: MemoryConfig,
-    /// Composite-scenario alias for `memory.anonymous_rss`. Cleared by [`Self::normalize`].
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub anonymous: Option<AnonymousAlias>,
     pub cpu: CpuConfig,
     pub memory_access: MemoryAccessConfig,
-    /// Composite-scenario alias for `memory_access.pages_per_second`. Cleared by
-    /// [`Self::normalize`].
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub faults: Option<FaultsAlias>,
     pub file_backed: FileBackedConfig,
     pub shared: SharedConfig,
     pub io: IoConfig,
@@ -265,48 +221,16 @@ impl Default for WorkloadState {
     fn default() -> Self {
         Self {
             running: false,
-            experiment: ExperimentConfig::default(),
             controller: ControllerConfig::default(),
             memory: MemoryConfig::default(),
-            anonymous: None,
             cpu: CpuConfig::default(),
             memory_access: MemoryAccessConfig::default(),
-            faults: None,
             file_backed: FileBackedConfig::default(),
             shared: SharedConfig::default(),
             io: IoConfig::default(),
             network: NetworkConfig::default(),
         }
     }
-}
-
-/// The identity of a run: what makes two runs of the same workload comparable.
-///
-/// Neither field changes what the host is asked to do. Both exist so that a measurement taken
-/// during one run can be attributed to that run afterwards, which is the whole point of the
-/// deterministic experiment mode.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(default)]
-pub struct ExperimentConfig {
-    /// One seed for every random walk in the workload.
-    ///
-    /// `null` leaves each controller on its own default, which is the historical behaviour and is
-    /// already reproducible across process restarts. Setting it derives a distinct stream per
-    /// controller from this one value, so one number makes the whole run reproducible instead of
-    /// requiring three.
-    ///
-    /// A controller's own `random_seed`, where it has one, takes precedence: this is the fallback
-    /// for the ones that were not set explicitly, not an override of the ones that were.
-    pub seed: Option<u64>,
-    /// When `t = 0`, as an RFC 3339 timestamp such as `2026-10-04T11:30:37Z`.
-    ///
-    /// `null` means `t = 0` is the moment the workload started running. Setting an absolute time
-    /// instead is what makes a run comparable to another one that started earlier or later: with
-    /// the same seed and the same timestamp, two runs ask for the same thing at the same offsets.
-    ///
-    /// A timestamp in the future is accepted and yields negative `t` until it arrives, which is
-    /// the honest reading: the experiment has not started yet.
-    pub start_time: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -381,7 +305,7 @@ pub struct CpuConfig {
     pub cpus: Vec<usize>,
     /// Where workers run: "auto" leaves placement to the scheduler, "pin" binds worker
     /// `i` to `cpus[i % cpus.len()]`. Pinning makes utilization reproducible, which is
-    /// what a scenario replay needs; leaving it on "auto" is what you want when the point
+    /// what a replay needs; leaving it on "auto" is what you want when the point
     /// is to consume capacity without caring where it is consumed.
     pub affinity: String,
 }
@@ -460,8 +384,7 @@ impl<'de> Deserialize<'de> for AccessPattern {
 /// Every field defaults rather than being required, like every other controller's configuration.
 /// A `PATCH` that names one field of a nested object must not have to spell out the rest of it:
 /// requiring `pattern` and `random_seed` to go along with `pages_per_second` would make the
-/// canonical spelling of the composite scenario's fault rate unusable, which is the reason the
-/// `faults.minor_rate` alias exists at all.
+/// fault rate's canonical spelling unusable.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct MemoryAccessConfig {
@@ -923,38 +846,7 @@ impl Default for CpuConfig {
 }
 
 impl WorkloadState {
-    /// Fold the composite-scenario aliases into their canonical fields.
-    ///
-    /// The aliases are an input spelling, not a second source of truth: after this runs the
-    /// canonical fields hold everything and the aliases are gone, so there is exactly one place a
-    /// value can live and the controller never has to ask which spelling it was given.
-    ///
-    /// When both spellings are present the alias wins. That case is reachable rather than
-    /// hypothetical: `PATCH` merges into the stored state, so patching `anonymous.rss` onto a state
-    /// that already carries `memory.anonymous_rss` leaves both present. Rejecting that would make
-    /// it impossible to change one dimension through the spelling you did not originally use, and
-    /// "first one wins" would depend on merge order. One fixed rule is enough: the alias is the
-    /// more specific statement about the dimension, so it is the one applied.
-    pub fn normalize(&mut self) {
-        if let Some(rss) = self.anonymous.take().and_then(|alias| alias.rss) {
-            self.memory.anonymous_rss = Some(rss);
-        }
-        if let Some(rate) = self.faults.take().and_then(|alias| alias.minor_rate) {
-            self.memory_access.pages_per_second = rate;
-        }
-    }
-
     pub fn validate(&self) -> Result<(), LoadlabError> {
-        // Parsed here rather than at the point of use so that a malformed timestamp is a 400 with a
-        // precise message, instead of a controller that silently measures from the wrong instant
-        // hours later.
-        if let Some(start_time) = &self.experiment.start_time
-            && let Err(error) = crate::experiment::parse_rfc3339(start_time)
-        {
-            return Err(LoadlabError::InvalidConfig(format!(
-                "experiment.start_time {start_time:?} is not an RFC 3339 timestamp: {error}"
-            )));
-        }
         if !(1..=10_000).contains(&self.controller.tick_ms) {
             return Err(LoadlabError::InvalidConfig(
                 "controller.tick_ms must be between 1 and 10000".to_owned(),
@@ -1018,12 +910,12 @@ impl WorkloadState {
 pub struct RuntimeStatus {
     /// When the *process* started, which is what `elapsed_seconds` reports.
     ///
-    /// Deliberately not the same thing as [`Self::experiment`]: uptime is a property of the process,
-    /// and the experiment clock is a property of the current run. They are different instants, and
-    /// the experiment clock moves forward while uptime keeps counting.
+    /// Deliberately not the same thing as [`Self::run_clock`]: uptime is a property of the process,
+    /// and the run clock is a property of the current run. They are different instants, and the run
+    /// clock restarts while uptime keeps counting.
     pub started_at: Instant,
     /// The origin of `t` for the current run.
-    pub experiment: crate::experiment::ExperimentClock,
+    pub run_clock: crate::clock::RunClock,
     pub last_tick_at: Option<Instant>,
     pub tick_count: u64,
     pub arena_resident_bytes: u64,
@@ -1307,7 +1199,7 @@ impl RuntimeStatus {
     pub fn new(baseline_rss_anon_bytes: u64) -> Self {
         Self {
             started_at: Instant::now(),
-            experiment: crate::experiment::ExperimentClock::new(),
+            run_clock: crate::clock::RunClock::new(),
             last_tick_at: None,
             tick_count: 0,
             arena_resident_bytes: 0,
@@ -1678,9 +1570,9 @@ mod tests {
     /// A nested object must accept a partial body, whichever controller it belongs to.
     ///
     /// `memory_access` was the one configuration missing `#[serde(default)]`, so a `PATCH` naming
-    /// a single one of its fields was rejected for a missing "pattern" and the canonical spelling
-    /// of the composite scenario's fault rate could not be used at all. That is what the
-    /// `faults.minor_rate` alias was working around, and it should not be needed to set one number.
+    /// a single one of its fields was rejected for a missing "pattern" and the fault rate's
+    /// canonical spelling could not be used at all, so a partial nested body has to merge rather
+    /// than fail.
     #[allow(clippy::float_cmp)]
     #[test]
     fn a_partial_nested_controller_body_is_accepted() {
@@ -1701,25 +1593,23 @@ mod composite_tests {
     use super::WorkloadState;
     use crate::setting::Setting;
 
-    /// The composite scenario body, parsed and normalized.
-    ///
-    /// Written out in full rather than assembled field by field, because the body has to work
-    /// verbatim against `PUT /workload`.
+    /// A body that names several controllers at once is accepted. The composite spelling used to
+    /// carry the `anonymous` and `faults` aliases; with those gone the canonical fields spell the
+    /// same request.
     // Exact comparison is the assertion here, not an approximation: these values came from
-    // integer literals in the body, which are exactly representable, and "the alias reached the
-    // right field" is a statement about equality rather than about magnitude.
+    // integer literals in the body, which are exactly representable, and "the field received
+    // what the body asked for" is a statement about equality rather than about magnitude.
     #[allow(clippy::float_cmp)]
     #[test]
-    fn the_composite_scenario_body_is_accepted() {
+    fn a_multi_controller_body_is_accepted() {
         let body = r#"{
             "controller": { "max_memory_bytes": 536870912 },
-            "anonymous": { "rss": "500MiB + 200MiB*sin(t/30)" },
+            "memory": { "anonymous_rss": "500MiB + 200MiB*sin(t/30)" },
             "file_backed": { "rss": "200MiB" },
             "cpu": { "utilization": "100 + 50*sin(t/10)" },
-            "faults": { "minor_rate": 10000 }
+            "memory_access": { "pages_per_second": 10000 }
         }"#;
-        let mut state: WorkloadState = serde_json::from_str(body).expect("decode");
-        state.normalize();
+        let state: WorkloadState = serde_json::from_str(body).expect("decode");
         assert_eq!(
             state.memory.anonymous_rss,
             Some(Setting::Expression("500MiB + 200MiB*sin(t/30)".to_owned()))
@@ -1737,93 +1627,6 @@ mod composite_tests {
             Setting::constant(10000.0)
         );
         assert!(state.validate().is_ok());
-    }
-
-    /// An alias has to reach the field the controller actually reads, not sit in a parallel
-    /// structure that nothing consults.
-    #[test]
-    fn an_alias_reaches_the_field_the_controller_reads() {
-        let mut state: WorkloadState =
-            serde_json::from_str(r#"{"anonymous":{"rss":"128MiB"}}"#).expect("decode");
-        state.normalize();
-        assert_eq!(
-            state.memory.anonymous_rss,
-            Some(Setting::Expression("128MiB".to_owned()))
-        );
-        assert!(
-            state.anonymous.is_none(),
-            "the alias must not survive normalize"
-        );
-    }
-
-    #[allow(clippy::float_cmp)]
-    #[test]
-    fn the_faults_alias_reaches_the_access_controller() {
-        let mut state: WorkloadState =
-            serde_json::from_str(r#"{"faults":{"minor_rate":2500}}"#).expect("decode");
-        state.normalize();
-        assert_eq!(
-            state.memory_access.pages_per_second,
-            Setting::constant(2500.0)
-        );
-    }
-
-    /// A `PATCH` merges into the stored state, so patching one spelling onto a state that already
-    /// carries the other leaves both present. The rule has to be one fixed thing rather than
-    /// whichever field happened to be written first.
-    #[test]
-    fn the_alias_wins_when_both_spellings_are_present() {
-        let mut state: WorkloadState = serde_json::from_str(
-            r#"{"memory":{"anonymous_rss":"64MiB"},"anonymous":{"rss":"256MiB"}}"#,
-        )
-        .expect("decode");
-        state.normalize();
-        assert_eq!(
-            state.memory.anonymous_rss,
-            Some(Setting::Expression("256MiB".to_owned()))
-        );
-    }
-
-    /// The canonical spelling still works alongside the composite alias.
-    #[test]
-    fn the_canonical_spelling_is_unchanged() {
-        let mut state: WorkloadState =
-            serde_json::from_str(r#"{"memory":{"anonymous_rss":"64MiB"}}"#).expect("decode");
-        state.normalize();
-        assert_eq!(
-            state.memory.anonymous_rss,
-            Some(Setting::Expression("64MiB".to_owned()))
-        );
-    }
-
-    /// `GET /state` is a published contract. Emitting `anonymous` or `faults` as null on every
-    /// scrape would change the response shape for every existing client to advertise two keys
-    /// that are accepted on input and never mean anything on output.
-    #[test]
-    fn the_aliases_do_not_appear_in_the_serialized_state() {
-        let encoded = serde_json::to_string(&WorkloadState::default()).expect("encode");
-        assert!(!encoded.contains(r#""anonymous":"#), "{encoded}");
-        assert!(!encoded.contains(r#""faults":"#), "{encoded}");
-    }
-
-    /// A typo, or a field this controller cannot honour, has to be a `400` naming what is
-    /// accepted. Silently dropping `major_rate` would report success for a request that does
-    /// nothing, which is the one outcome this API never produces.
-    #[test]
-    fn a_major_fault_rate_is_rejected_rather_than_ignored() {
-        let error = serde_json::from_str::<WorkloadState>(r#"{"faults":{"major_rate":5000}}"#)
-            .expect_err("major_rate is not addressable");
-        let message = error.to_string();
-        assert!(message.contains("major_rate"), "{message}");
-        assert!(message.contains("minor_rate"), "{message}");
-    }
-
-    #[test]
-    fn a_typo_inside_an_alias_is_rejected() {
-        assert!(
-            serde_json::from_str::<WorkloadState>(r#"{"anonymous":{"rsz":"1MiB"}}"#).is_err(),
-            "a misspelled alias field must not be ignored"
-        );
     }
 
     /// A network rate keeps accepting the plain JSON number every existing client sends, while
@@ -1890,7 +1693,7 @@ mod composite_tests {
     }
 
     /// The controller evaluates the expression, not `settings`: stopping the workload has to zero
-    /// the rate whatever the caller passes, so a paused experiment reports no traffic.
+    /// the rate whatever the caller passes, so a stopped workload reports no traffic.
     #[test]
     fn a_stopped_workload_zeroes_the_network_rate() {
         let state = WorkloadState::default();

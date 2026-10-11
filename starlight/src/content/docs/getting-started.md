@@ -15,7 +15,7 @@ cargo run --release
 ```bash
 curl -s -X PUT localhost:8080/workload \
   -H 'content-type: application/json' \
-  -d '{"anonymous":{"rss":"512MiB"}}'
+  -d '{"memory":{"anonymous_rss":"512MiB"}}'
 
 curl -s -X POST localhost:8080/workload/start
 ```
@@ -51,18 +51,17 @@ curl -s -X PATCH localhost:8080/workload \
 | `PUT /workload` | replace the whole desired state |
 | `PATCH /workload` | merge a partial update into it |
 | `POST /workload/start` / `stop` | run or halt the workload |
-| `GET /state` | the desired state, normalized |
-| `GET /metrics` | JSON: host identity, the run's identity, and every observation |
+| `GET /state` | the desired state |
+| `GET /metrics` | JSON: host identity and every observation |
 | `GET /prometheus` | the same numbers as a Prometheus exposition |
-| `POST /scenarios/load` / `run` / `stop`, `GET /scenarios` | named, versioned workloads |
 | `GET /health` | liveness; the one endpoint that never needs a token |
 
 ## What you can drive
 
 | Controller | Knobs |
 |---|---|
-| anonymous memory | `rss`, `thp` (`madvise`/`always`/`never`) |
-| memory access | `pattern` (sequential, random, stride, working_set, hot_cold, cold_scan), `pages_per_second` |
+| anonymous memory | `memory.anonymous_rss`, `memory.thp` |
+| memory access | `memory_access.pattern` (sequential, random, stride, working_set, hot_cold, cold_scan), `memory_access.pages_per_second` |
 | file-backed memory | `rss`, `pages_per_second`, `access_pattern`, `madvise` |
 | shared / copy-on-write | `shared_bytes`, `private_bytes`, `actors`, `cow_write_ratio`, memfd or SysV |
 | disk I/O | `read_bps`, `write_bps`, `iops`, `fsync_rate`, `block_size`, `queue_depth`, `pattern`, `direct` |

@@ -2,6 +2,17 @@
 title: "CPU utilization"
 ---
 
+> **In short.** `cpu.utilization` burns CPU time in percentage points of a single logical CPU —
+> `100` is one saturated core, `200` is two. A pool of worker threads spins and sleeps on a duty
+> cycle shaped by the target, which can be an expression in `t`. Minimal form:
+>
+> ```json
+> {"cpu":{"utilization":"150","workers":2}}
+> ```
+>
+> What to watch in `GET /metrics` under `controller.cpu`: `requested_utilization_pct`,
+> `target_utilization_pct`, `actual_utilization_pct`, `worker_count`, `saturated`, `converged`.
+
 `cpu.utilization` is a number or an expression in **percent of a single logical CPU**, so `100` is one
 saturated core, `200` is two, and `400` is four. It is not a percentage of the host: on a
 sixteen-core machine `800` saturates the whole machine, and there is no separate "of the host"
@@ -9,14 +20,12 @@ form. The reported `actual_utilization_pct` uses the same unit, so a target and 
 can be compared directly.
 
 The expression is dimensionless — byte suffixes such as `1MiB` are rejected rather than
-silently reinterpreted — and `t` is the experiment clock, as in `memory.anonymous_rss`.
+silently reinterpreted — and `t` is the run clock, as in `memory.anonymous_rss`.
 It is evaluated every tick, so `150 + 50*sin(t/30)` tracks a moving setpoint rather than
 settling on its value at `t=0`. A negative result is clamped to zero at runtime; a negative
 value at `t=0` is a validation error.
 
-`t` is seconds since the workload started, and it restarts with it. `experiment.start_time`
-moves that origin to a fixed instant instead, which is what lets two hosts running one scenario
-share a timeline; see [The experiment](../../experiment/#the-experiment). It is *not* process uptime:
+`t` is seconds since the workload started, and it restarts with it. It is *not* process uptime:
 `loadlab_process_uptime_seconds` is a separate series, and a workload restarted ten minutes into
 a process reports a `t` near zero while uptime keeps climbing.
 
@@ -41,7 +50,7 @@ than it sounds: `workers: 0` means *one per logical CPU*, so spawning on a defau
 would start a thread per core to sit at duty zero — and the default is what any `PATCH` that
 never mentions `cpu` restores. A stopped workload also reports `requested_utilization_pct` as
 `0` regardless of what its expression would evaluate to, so a dashboard cannot mistake a
-paused experiment for a live one.
+stopped workload for a live one.
 
 ### What the controller reports
 

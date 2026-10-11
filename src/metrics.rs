@@ -55,8 +55,6 @@ pub struct Metrics {
     process_uptime_seconds: Gauge,
     process_threads: IntGauge,
     host_info: IntGauge,
-    experiment_seed: IntGauge,
-    experiment_elapsed_seconds: Gauge,
     workload_running: IntGauge,
     configured_max_memory_bytes: IntGauge,
     configured_max_file_backed_bytes: IntGauge,
@@ -238,22 +236,6 @@ impl Metrics {
                 .const_label("machine", &host.machine)
                 .const_label("cpu_model", host.cpu_model.as_deref().unwrap_or("unknown"))
                 .const_label("cpus", host.cpus.to_string().as_str()),
-            )?,
-            // The seed is a value rather than a label on purpose. It is client-supplied, so as a
-            // label every distinct seed would mint a new series and the time series behind them
-            // would fragment; as a gauge it is one series whose value changes, and
-            // `changes()` finds the runs that used different seeds.
-            experiment_seed: gauge(opts!(
-                "loadlab_experiment_seed",
-                "The experiment seed, or 0 when none is configured. Changes are what a reproducible \
-                 run is keyed on: same seed, same workload state and same start time means the \
-                 same walk."
-            ))?,
-            experiment_elapsed_seconds: float_gauge(
-                "loadlab_experiment_elapsed_seconds",
-                "Seconds since t=0 for the current run, the value every expression in the workload \
-                 is evaluated against. Unlike loadlab_process_uptime_seconds it restarts when the \
-                 workload does, and is offset by experiment.start_time when one is configured.",
             )?,
             process_threads: gauge(opts!(
                 "loadlab_process_threads",
@@ -832,8 +814,6 @@ impl Metrics {
             Box::new(metrics.build_info.clone()) as Box<dyn prometheus::core::Collector>,
             Box::new(metrics.process_uptime_seconds.clone()),
             Box::new(metrics.host_info.clone()),
-            Box::new(metrics.experiment_seed.clone()),
-            Box::new(metrics.experiment_elapsed_seconds.clone()),
             Box::new(metrics.process_threads.clone()),
             Box::new(metrics.workload_running.clone()),
             Box::new(metrics.configured_max_memory_bytes.clone()),
@@ -960,22 +940,17 @@ impl Metrics {
     }
 
     /// Update every metric from a fresh reading and render the exposition.
-    /// Publish which run these numbers belong to: the host, the seed and `t`.
+    /// Publish which host these numbers belong to.
     ///
     /// Split out of `render` because it is the one part of a scrape that answers "what was this?"
     /// rather than "how much?", and because `render` is long enough that five more lines there is
     /// five more lines every reader of it has to get past.
-    fn set_run_identity(&self, state: &WorkloadState, runtime: &RuntimeStatus) {
+    fn set_run_identity(&self, runtime: &RuntimeStatus) {
         self.host_info.set(1);
-        // Uptime and the experiment clock are deliberately separate series. They coincided while `t`
-        // was measured from process start, and publishing one number for both would make a restarted
-        // workload look like a slow-aging process.
+        // Uptime is a property of the process, not of the run: a restarted workload must not look
+        // like a slow-aging process.
         self.process_uptime_seconds
             .set(runtime.started_at.elapsed().as_secs_f64());
-        self.experiment_seed
-            .set(to_i64(state.experiment.seed.unwrap_or(0)));
-        self.experiment_elapsed_seconds
-            .set(runtime.experiment.elapsed_seconds());
     }
 
     /// The I/O latency histograms, for the controller that fills them.
@@ -1000,7 +975,7 @@ impl Metrics {
         cpu: &CpuStats,
     ) -> Result<String, prometheus::Error> {
         self.build_info.set(1);
-        self.set_run_identity(state, runtime);
+        self.set_run_identity(runtime);
         self.process_threads.set(to_i64(cpu.threads));
         self.workload_running.set(i64::from(state.running));
         self.configured_max_memory_bytes
@@ -1894,100 +1869,6 @@ mod tests {
         assert!(
             body.contains("cpu_model=\"unknown\""),
             "a missing cpu model must still publish a label:\n{body}"
-        );
-    }
-
-    #[test]
-    fn the_experiment_seed_is_a_value_and_not_a_label() {
-        let metrics = Metrics::new(&test_host()).expect("registry");
-        let mut state = running_state();
-        state.experiment.seed = Some(4242);
-        let body = metrics
-            .render(
-                &state,
-                &runtime(),
-                &memory(),
-                &FaultStats::default(),
-                &CpuStats::default(),
-            )
-            .expect("encode");
-
-        // The seed is client-supplied, so as a label every distinct seed would mint a series and
-        // fragment the history behind it. As a gauge there is one series and the value changes.
-        assert_eq!(sample_value(&body, "loadlab_experiment_seed"), 4242.0);
-        assert!(
-            !body.contains("loadlab_experiment_seed{"),
-            "the seed must not be a label"
-        );
-    }
-
-    #[test]
-    fn no_configured_seed_is_reported_as_zero_rather_than_absent() {
-        let metrics = Metrics::new(&test_host()).expect("registry");
-        let mut state = running_state();
-        state.experiment.seed = None;
-        let body = metrics
-            .render(
-                &state,
-                &runtime(),
-                &memory(),
-                &FaultStats::default(),
-                &CpuStats::default(),
-            )
-            .expect("encode");
-
-        // 0 and not `null`: a gauge cannot carry null, and a series that appears only once a seed
-        // is set cannot answer `seed == 0` for the runs that had none.
-        assert_eq!(sample_value(&body, "loadlab_experiment_seed"), 0.0);
-    }
-
-    #[test]
-    fn the_experiment_elapsed_series_tracks_the_run_and_not_the_process() {
-        let metrics = Metrics::new(&test_host()).expect("registry");
-        let mut status = runtime();
-        // A run that started a moment ago, on a process that has been up for hours: the whole
-        // reason the experiment clock exists.
-        let mut state = running_state();
-        state.experiment.seed = Some(1);
-
-        metrics
-            .render(
-                &state,
-                &status,
-                &memory(),
-                &FaultStats::default(),
-                &CpuStats::default(),
-            )
-            .expect("encode");
-        let before = sample_value(
-            &metrics
-                .render(
-                    &state,
-                    &status,
-                    &memory(),
-                    &FaultStats::default(),
-                    &CpuStats::default(),
-                )
-                .expect("encode"),
-            "loadlab_experiment_elapsed_seconds",
-        );
-        status.experiment.observe(true, None);
-        std::thread::sleep(Duration::from_millis(20));
-        let body = metrics
-            .render(
-                &state,
-                &status,
-                &memory(),
-                &FaultStats::default(),
-                &CpuStats::default(),
-            )
-            .expect("encode");
-
-        let after = sample_value(&body, "loadlab_experiment_elapsed_seconds");
-        assert!(after > before, "the experiment clock did not advance");
-        assert!(
-            after < status.started_at.elapsed().as_secs_f64(),
-            "the experiment clock should be the age of the run, not of the process"
         );
     }
 
